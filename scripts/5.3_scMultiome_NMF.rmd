@@ -1,0 +1,686 @@
+---
+title: "5.3 scMultiome NMF"
+author: "Anna Schwager"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r silence, include=FALSE, message=F, warning=F}
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  fig.show = "hold"
+)
+```
+
+# R setup
+
+```{r source, message=F, warning=F}
+
+here::i_am("scripts/5.3_scMultiome_NMF.Rmd")
+mainDir = here::here()
+
+set.seed(123)
+```
+
+```{r libraries_new, message=F, warning=F}
+library(Signac)
+library(Seurat)
+library(tidyverse)
+library(biovizBase)
+library(scales)
+library(pheatmap)
+library(grid)
+library(gridExtra)
+library(rlang)
+library(patchwork)
+library(GenomeInfoDb)
+library(SingleCellExperiment)
+library(ComplexHeatmap)
+library(destiny)
+library(dplyr)
+library(qs)
+library(GeneNMF)
+library(UCell)
+library(ggpp)
+library(tidytext)
+library(ggpointdensity)
+```
+
+# Setting directories and input files
+
+```{r dir}
+mainDir = here::here()
+inputDir =  file.path(mainDir,"input") 
+outputDir = file.path(mainDir, "output")
+annotDir = file.path(mainDir, "annotation")
+
+outputDir_local = file.path(outputDir, "epigenomic_diffusion") ; if(!file.exists(outputDir_local)){dir.create(outputDir_local)}
+outputDir_objects = file.path(outputDir_local, "objects") ; if(!file.exists(outputDir_objects)){dir.create(outputDir_objects)}
+outputDir_plots = file.path(outputDir_local, "plots") ; if(!file.exists(outputDir_plots)){dir.create(outputDir_plots)}
+outputDir_tables = file.path(outputDir_local, "tables") ; if(!file.exists(outputDir_tables)){dir.create(outputDir_tables)}
+
+```
+
+# Set colors
+
+```{r col}
+mypal <- c("#4eb7b4","#F9C22EFF","#e4722c", "#c94c9d", "#5c4d7d", "#469D76FF", "#f7dcad", "#3C4B99FF", "#DF9ED4FF", "#C93F55FF", "#E59A52FF", "#EDCE79FF", "pink", "grey", "#92C051FF")
+
+cell_cols <- c(
+  basal   = "#236ec4",
+  luminal = "#ac0000",
+  LP      = "#a3215e",
+  HS      = "#F9C22EFF",
+  Alv     = "#f7dcad"
+)
+
+group_cols <- c(CreP_EARLY = "#c0d69f", 
+                CreP_LATE = "#61980e",
+                CreN = "#5c4d7d",
+                Rosa = "#c94c9d")
+
+```
+
+# Load objects
+
+```{r load, message=F, warning=F}
+seurat_rna <- qread(file.path(outputDir_objects, "seurat_rna_step4_new.qs"))
+seurat <- qread(file.path(outputDir_objects, "seurat_step3_new.qs"))
+seurat_down <- qread(file.path(outputDir_objects, "seurat_down_step3_new.qs"))
+
+```
+
+# NMF
+
+Subset to CREpos only
+
+```{r subset, message=F, warning=F}
+seurat_rna$Cre <- dplyr::case_when(
+  seurat_rna$Group %in% c("CreN", "Rosa") ~ "CreN",
+  seurat_rna$Group %in% c("CreP_EARLY", "CreP_LATE") ~ "CreP",
+  TRUE ~ NA_character_
+)
+
+seurat_crepos <- subset(seurat_rna, subset = Cre == "CreP")
+```
+
+## Program identification
+
+Remove uncharachterised transcripts for interpretability
+
+```{r nmf, message=F, warning=F, eval=F}
+genes_keep <- rownames(seurat_crepos)
+
+genes_keep <- genes_keep[
+  !grepl("^Gm|Rik|^AC[0-9]|^AL[0-9]|^AP[0-9]|^AW[0-9]|^BC[0-9]|^CT[0-9]", genes_keep)
+]
+seurat_filtered <- subset(seurat_crepos, features = genes_keep)
+seurat_filtered <- FindVariableFeatures(seurat_filtered, nfeatures = 3000, assay = "SCT_umi")
+
+```
+
+```{r nmf2, message=F, warning=F, eval=F}
+seu.list <- SplitObject(seurat_filtered, split.by = "Exp")
+```
+
+```{r nmf3, message=F, warning=F, eval=F}
+geneNMF.programs <- multiNMF(seu.list, assay="SCT_umi", slot="data", k=4:9, nfeatures = 900)
+geneNMF.metaprograms <- getMetaPrograms(geneNMF.programs,
+                                        nMP=16,
+                                        weight.explained = 0.75,
+                                        specificity.weight = 7,
+                                        min.confidence = 0.6,
+                                        max.genes= 80,
+                                        hclust.method = "ward.D2")
+
+geneNMF.metaprograms$metaprograms.metrics
+```
+
+```{r nmf4, message=F, warning=F, eval=F}
+anno_colors <- c(mypal, "black", "grey")
+names(anno_colors) <- names(geneNMF.metaprograms$metaprograms.genes)
+
+ph <- plotMetaPrograms(geneNMF.metaprograms, annotation_colors = anno_colors )
+```
+
+Remove programs with bad internal consistency
+
+```{r nmf44, message=F, warning=F, eval=F}
+geneNMF.metaprograms <- dropMetaPrograms(
+  geneNMF.metaprograms,
+  dropMP = c("MP5","MP6","MP8", "MP11", "MP13")
+)
+```
+
+## Cell MP scores
+
+```{r nmf5, message=F, warning=F, eval=F}
+mp.genes <- geneNMF.metaprograms$metaprograms.genes
+seurat_filtered <- AddModuleScore_UCell(seurat_filtered, features = mp.genes, assay="SCT_umi", ncores=4, name = "")
+```
+
+## Dim reduction on NMF
+
+```{r nmf6, message=F, warning=F, eval=F}
+ndim <- 15
+
+seurat_filtered <- runNMF(seurat_filtered, k = ndim, assay = "SCT_umi")
+seurat_filtered <- RunUMAP(seurat_filtered,
+                      reduction = "NMF",
+                      dims=1:ndim, reduction.name = "NMF_UMAP",
+                      reduction.key = "nmfUMAP_")
+```
+
+# Reload step 7
+
+```{r nmf_save, message=F, warning=F, eval=F}
+qsave(geneNMF.metaprograms, file.path(outputDir_objects, "nmf.qs"))
+qsave(seurat_filtered, file.path(outputDir_objects, "seurat_rna_filtered_nmf.qs"))
+```
+
+```{r nmf_load, message=F, warning=F}
+geneNMF.metaprograms <- qread(file.path(outputDir_objects, "nmf.qs"))
+seurat_filtered <- qread(file.path(outputDir_objects, "seurat_rna_filtered_nmf.qs"))
+mp.genes <- geneNMF.metaprograms$metaprograms.genes
+```
+
+## Final MP heatmap
+
+```{r nmf_plot, message=F, warning=F}
+program_cols <- c(
+  MP1  = "#4eb7b4",
+  MP2  = "#f7dcad",
+  MP3  = "#faeb65",
+  MP4  = "#afcf74",
+  MP7  = "#d74e7b",
+  MP9  =  "#d6e366", 
+  MP10 =  "#a76a7f",
+  MP12 = "#8c3a56",
+  MP14 = "#390918", 
+  MP15 = "#f9edd6",   
+  MP16 = "#779c37"
+)
+
+ph <- plotMetaPrograms(geneNMF.metaprograms, annotation_colors = program_cols)
+ph
+
+geneNMF.metaprograms$metaprograms.metrics
+```
+
+```{r nmf_save1, message=F, warning=F, eval=F, include=F}
+pdf(
+  file.path(outputDir_plots, "nmf_heatmap_final.pdf"),
+  width = 160 / 25.4,
+  height = 150 / 25.4
+)
+
+ph
+dev.off()
+```
+
+## Genes and weights per MP
+
+```{r nmf_weights, message=F, warning=F}
+df_weights <- purrr::imap_dfr(
+  geneNMF.metaprograms$metaprograms.genes.weights,
+  ~ tibble(
+    gene = names(.x),
+    weight = .x,
+    MP = .y
+  )
+)
+
+df_top <- df_weights %>%
+  group_by(MP) %>%
+  slice_max(weight, n = 10) %>%
+  ungroup() %>%
+  mutate(gene_plot = reorder_within(gene, weight, MP))
+
+p_MP <- ggplot(df_top, aes(x = gene_plot, y = weight)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(~MP, scales = "free_y") +
+  scale_x_reordered() +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(),
+    axis.ticks.x = element_line()
+  ) +
+  labs(x = "Gene", y = "Weight")
+#write.csv(df_weights, file.path(outputDir_tables, "MP_gene_weights.csv"))
+
+p_MP 
+```
+
+```{r nmf_save2, message=F, warning=F, eval=F, include=F}
+ggsave(file.path(outputDir_plots, "genes_nmf.pdf"),
+       plot = p_MP  ,
+       device = "pdf",
+       units = "mm",
+       width = 220,
+       height = 150)
+```
+
+```{r nmf_vln, message=F, warning=F}
+p_types <- VlnPlot(seurat_filtered, features=names(mp.genes),
+                   group.by = c("annot_rna_joint_alv"), assay = "SCT_umi",
+                   cols = cell_cols, pt.size = 0, ncol=6)
+
+p_cre <- VlnPlot(seurat_filtered, features=names(mp.genes), assay = "SCT_umi",
+                 group.by = c("Group"), pt.size = 0, ncol=6, cols = group_cols)
+
+p_types
+p_cre
+```
+
+```{r nmf_save3, message=F, warning=F, eval=F, include=F}
+ggsave(file.path(outputDir_plots, "mps_cell_type.pdf"),
+       plot = p_types  ,
+       device = "pdf",
+       units = "mm",
+       width = 220,
+       height = 150)
+
+ggsave(file.path(outputDir_plots, "mps_cre.pdf"),
+       plot = p_cre  ,
+       device = "pdf",
+       units = "mm",
+       width = 220,
+       height = 150)
+
+```
+
+# Functional enrichment per programm
+
+## GSEA
+
+```{r enrichments, message=F, warning=F}
+top_p_HALLMARKS <- lapply(geneNMF.metaprograms$metaprograms.genes, function(program) {
+  runGSEA(program, universe=rownames(seurat_crepos),
+          category = "H",
+          species = "Mus musculus",
+          pval.thr = 0.05)
+})
+
+
+top_p_C2KEGG <- lapply(geneNMF.metaprograms$metaprograms.genes, function(program) {
+  runGSEA(program, universe=rownames(seurat_crepos),
+          category = "C2",
+          subcategory = "CP:KEGG_LEGACY",
+          species = "Mus musculus",
+          pval.thr = 0.05)
+})
+
+
+top_p_C2WP <- lapply(geneNMF.metaprograms$metaprograms.genes, function(program) {
+  runGSEA(program, universe=rownames(seurat_crepos),
+          category = "C2",
+          subcategory = "CP:WIKIPATHWAYS",
+          species = "Mus musculus",
+          pval.thr = 0.05)
+})
+
+```
+
+```{r enrichments2, message=F, warning=F}
+df_h <- purrr::imap_dfr(top_p_HALLMARKS, function(x, mp) {
+  if (nrow(x) == 0) return(NULL)
+  as.data.frame(x) %>%
+    mutate(MP = mp)
+}) %>%
+  filter(padj < 0.05) %>%
+  mutate(pathway_clean = gsub("^HALLMARK_", "", pathway)) %>%
+  group_by(MP) %>%
+  mutate(pathway_plot = reorder_within(pathway_clean, foldEnrichment, MP)) %>%
+  ungroup()
+
+df_h <- df_h %>% mutate(overlapGenes = sapply(overlapGenes, paste, collapse = ";"))
+#write.csv(df_h, file.path(outputDir_tables, "MP_enrichment_H.csv"))
+
+df_C2WP <- purrr::imap_dfr(top_p_C2WP, function(x, mp) {
+  if (nrow(x) == 0) return(NULL)
+  as.data.frame(x) %>%
+    mutate(MP = mp)
+}) %>%
+  filter(padj < 0.05) %>%
+  group_by(MP) %>%
+  slice_min(padj, n = 10, with_ties = FALSE) %>%   # ← keep top 10
+  mutate(pathway_plot = reorder_within(pathway, foldEnrichment, MP)) %>%
+  ungroup()
+
+df_C2WP <- df_C2WP %>% mutate(overlapGenes = sapply(overlapGenes, paste, collapse = ";"))
+#write.csv(df_C2WP, file.path(outputDir_tables, "MP_enrichment_C2WP.csv"))
+
+df_C2KEGG <- purrr::imap_dfr(top_p_C2KEGG, function(x, mp) {
+  if (nrow(x) == 0) return(NULL)
+  as.data.frame(x) %>%
+    mutate(MP = mp)
+}) %>%
+  filter(padj < 0.05) %>%
+  group_by(MP) %>%
+  slice_min(padj, n = 10, with_ties = FALSE) %>%   # ← keep top 10
+  mutate(pathway_plot = reorder_within(pathway, foldEnrichment, MP)) %>%
+  ungroup()
+
+df_C2KEGG <- df_C2KEGG %>% mutate(overlapGenes = sapply(overlapGenes, paste, collapse = ";"))
+#write.csv(df_C2KEGG, file.path(outputDir_tables, "MP_enrichment_C2KEGG.csv"))
+```
+
+## Pathway heatmap
+
+```{r enrichments3, message=F, warning=F}
+bind_gsea_list <- function(x, source_name) {
+  purrr::imap_dfr(x, function(res, mp) {
+    if (nrow(res) == 0) return(NULL)
+    as.data.frame(res) %>%
+      mutate(
+        MP = mp,
+        source = source_name
+      )
+  })
+}
+```
+
+```{r enrichments4, message=F, warning=F}
+desired_order <- paste0("MP", 1:16)
+
+df_enrich <- bind_rows(
+  bind_gsea_list(top_p_HALLMARKS, "HALLMARK"),
+  bind_gsea_list(top_p_C2WP, "WIKIPATHWAYS"),
+  bind_gsea_list(top_p_C2KEGG, "KEGG")
+) %>%
+  mutate(
+    padj = as.numeric(padj),
+    score = -log10(padj)
+  ) %>%
+  filter(!is.na(padj), padj < 0.05)
+
+df_top <- df_enrich %>%
+  group_by(MP) %>%
+  slice_min(padj, n = 10, with_ties = FALSE) %>%
+  ungroup()
+
+mat_df <- df_top %>%
+  select(pathway, MP, score) %>%
+  group_by(pathway, MP) %>%
+  summarise(score = max(score), .groups = "drop") %>%
+  pivot_wider(names_from = MP, values_from = score, values_fill = 0)
+
+mat <- mat_df %>%
+  column_to_rownames("pathway") %>%
+  as.matrix()
+
+row_order <- apply(mat, 1, which.max)
+mat <- mat[order(row_order, rownames(mat)), , drop = FALSE]
+
+annotation_col <- data.frame(
+  metaprogram = colnames(mat),
+  row.names = colnames(mat)
+)
+
+ann_colors <- list(
+  metaprogram = program_cols
+)
+
+desired_order <- desired_order[desired_order %in% colnames(mat)]
+mat <- mat[, desired_order]
+annotation_col <- annotation_col[desired_order, , drop = FALSE]
+
+p_all <- pheatmap(
+  mat,
+  cluster_rows =TRUE,
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("white", "darkblue"))(100),
+  annotation_col = annotation_col,
+  annotation_colors = ann_colors,
+  border_color = NA,
+  fontsize_row = 8,
+  fontsize_col = 10,
+  main = "MP pathway enrichment"
+)
+
+p_all
+```
+
+```{r nmf_save4, message=F, warning=F, eval=F, include=F}
+pdf(
+  file.path(outputDir_plots, "nmf_all_enrich_padj.pdf"),
+  width = 170 / 25.4,
+  height = 150 / 25.4
+)
+
+p_all
+dev.off()
+```
+
+# Dim reduction on NMF
+
+```{r mimred, message=F, warning=F}
+DimPlot(seurat_filtered, cols = mypal,
+        reduction = "NMF_UMAP",
+        group.by = c("annot_rna_joint_alv", "Group"),
+        combine = TRUE)
+```
+
+# Harmonize meta's
+
+```{r meta1, message=F, warning=F, eval=F}
+meta_epi <- seurat@meta.data 
+meta_rna <- seurat_rna@meta.data
+meta_f <- seurat_filtered@meta.data
+
+
+cols_to_add <- c("MP1","MP2","MP3","MP4","MP7","MP9","MP10","MP12","MP14","MP15","MP16")
+
+meta_rna[, cols_to_add] <- meta_f[rownames(meta_rna), cols_to_add]
+meta_epi[, cols_to_add] <- meta_f[rownames(meta_epi), cols_to_add]
+```
+
+```{r meta2, message=F, warning=F, eval=F}
+seurat <- AddMetaData(seurat, meta_epi)
+seurat_rna <- AddMetaData(seurat_rna, meta_rna)
+```
+
+# Reload step 8
+
+```{r save8, message=F, warning=F, eval=F}
+qsave(seurat, file.path(outputDir_objects, "seurat_step4_new.qs"))
+qsave(seurat_rna, file.path(outputDir_objects, "seurat_rna_step6_new.qs"))
+```
+
+```{r load8, message=F, warning=F}
+seurat <- qread(file.path(outputDir_objects, "seurat_step4_new.qs"))
+seurat_rna <- qread(file.path(outputDir_objects, "seurat_rna_step6_new.qs"))
+seurat_filtered <- qread(file.path(outputDir_objects, "seurat_rna_filtered_nmf.qs"))
+
+meta_epi <- seurat@meta.data 
+meta_rna <- seurat_rna@meta.data
+meta_f <- seurat_filtered@meta.data
+
+```
+
+# Correlation of MPs with pseudotime and QC
+
+```{r corr1, message=F, warning=F}
+filter_outliers <- function(df, x, y, q = 0.99) {
+  xq <- quantile(df[[x]], probs = c(1 - q, q), na.rm = TRUE)
+  yq <- quantile(df[[y]], probs = c(1 - q, q), na.rm = TRUE)
+  
+  df %>%
+    filter(
+      .data[[x]] >= xq[1], .data[[x]] <= xq[2],
+      .data[[y]] >= yq[1], .data[[y]] <= yq[2]
+    )
+}
+```
+
+```{r corr2, message=F, warning=F}
+mp_vars <- c("MP1","MP2","MP3","MP4","MP7","MP9","MP10","MP12","MP14","MP15","MP16")
+```
+
+## Counts
+
+```{r corr3, message=F, warning=F}
+plots <- lapply(mp_vars, function(mp) {
+  
+  df_plot <- meta_f %>%
+    dplyr::select(nCount_SCT_umi, !!rlang::sym(mp)) %>%
+    dplyr::rename(MP = !!rlang::sym(mp)) %>%
+    dplyr::filter(is.finite(nCount_SCT_umi), is.finite(MP)) %>%
+    filter_outliers("nCount_SCT_umi", "MP", q = 0.99)
+  
+  lab <- "n < 3"
+  if (nrow(df_plot) >= 3) {
+    cor_res <- suppressWarnings(cor.test(df_plot$nCount_SCT_umi, df_plot$MP, method = "pearson"))
+    lab <- paste0(
+      "R = ", round(unname(cor_res$estimate), 3),
+      "\np-val = ", format.pval(cor_res$p.value, digits = 3, eps = 1e-300)
+    )
+  }
+  
+  ggplot(df_plot, aes(x = nCount_SCT_umi, y = MP)) +
+    geom_pointdensity(adjust = 1) +
+    geom_smooth(method = "lm", se = FALSE, color = "black", linewidth = 0.8) +
+    scale_color_viridis_c(option = "magma") +
+    
+    theme_classic() +
+    theme(
+      legend.position = "none",
+      axis.title.x = element_text(size = 9),
+      axis.title.y = element_text(size = 9),
+      axis.text.x  = element_text(size = 8),
+      axis.text.y  = element_text(size = 8)
+    ) +
+    labs(
+      x = "nCount_SCT_umi",
+      y = mp,
+      title = paste("nCount_SCT_umi vs", mp)
+    ) +
+    annotate(
+      "text_npc",
+      npcx = 0.02, npcy = 0.98,
+      label = lab,
+      hjust = 0, vjust = 1,
+      size = 3.2
+    )
+})
+
+names(plots) <- mp_vars
+patchwork::wrap_plots(plots, ncol = 4)
+```
+
+## Mito reads
+
+```{r corr4, message=F, warning=F}
+plots <- lapply(mp_vars, function(mp) {
+  
+  df_plot <- meta_f %>%
+    dplyr::select(percent.mt, !!rlang::sym(mp)) %>%
+    dplyr::rename(MP = !!rlang::sym(mp)) %>%
+    dplyr::filter(is.finite(percent.mt), is.finite(MP)) %>%
+    filter_outliers("percent.mt", "MP", q = 0.99)
+  
+  lab <- "n < 3"
+  if (nrow(df_plot) >= 3) {
+    cor_res <- suppressWarnings(cor.test(df_plot$percent.mt, df_plot$MP, method = "pearson"))
+    lab <- paste0(
+      "R = ", round(unname(cor_res$estimate), 3),
+      "\np-val = ", format.pval(cor_res$p.value, digits = 3, eps = 1e-300)
+    )
+  }
+  
+  ggplot(df_plot, aes(x = percent.mt, y = MP)) +
+    geom_pointdensity(adjust = 1) +
+    geom_smooth(method = "lm", se = FALSE, color = "black", linewidth = 0.8) +
+    scale_color_viridis_c(option = "magma") +
+    
+    theme_classic() +
+    theme(
+      legend.position = "none",
+      axis.title.x = element_text(size = 9),
+      axis.title.y = element_text(size = 9),
+      axis.text.x  = element_text(size = 8),
+      axis.text.y  = element_text(size = 8)
+    ) +
+    labs(
+      x = "percent.mt",
+      y = mp,
+      title = paste("percent.mt vs", mp)
+    ) +
+    annotate(
+      "text_npc",
+      npcx = 0.02, npcy = 0.98,
+      label = lab,
+      hjust = 0, vjust = 1,
+      size = 3.2
+    )
+})
+
+names(plots) <- mp_vars
+
+patchwork::wrap_plots(plots, ncol = 4)
+```
+
+## Pretumoral pseudotime
+
+```{r corr44, message=F, warning=F}
+plots <- lapply(mp_vars, function(mp) {
+  
+  df_plot <- meta_f %>%
+    dplyr::select(pseudotime, !!rlang::sym(mp)) %>%
+    dplyr::rename(MP = !!rlang::sym(mp)) %>%
+    dplyr::filter(is.finite(pseudotime), is.finite(MP)) %>%
+    filter_outliers("pseudotime", "MP", q = 0.999)
+  
+  lab <- "n < 3"
+  if (nrow(df_plot) >= 3) {
+    cor_res <- suppressWarnings(cor.test(df_plot$pseudotime, df_plot$MP, method = "pearson"))
+    lab <- paste0(
+      "R = ", round(unname(cor_res$estimate), 3),
+      "\np-val = ", format.pval(cor_res$p.value, digits = 3, eps = 1e-300)
+    )
+  }
+  
+  ggplot(df_plot, aes(x = pseudotime, y = MP)) +
+    geom_pointdensity(adjust = 1) +
+    geom_smooth(method = "lm", se = FALSE, color = "black", linewidth = 0.8) +
+    scale_color_viridis_c(option = "magma") +
+    
+    theme_classic() +
+    theme(
+      legend.position = "none",
+      axis.title.x = element_text(size = 9),
+      axis.title.y = element_text(size = 9),
+      axis.text.x  = element_text(size = 8),
+      axis.text.y  = element_text(size = 8)
+    ) +
+    labs(
+      x = "Pseudotime",
+      y = mp,
+      title = paste("Pseudotime vs", mp)
+    ) +
+    annotate(
+      "text_npc",
+      npcx = 0.02, npcy = 0.98,
+      label = lab,
+      hjust = 0, vjust = 1,
+      size = 3.2
+    )
+})
+
+names(plots) <- mp_vars
+
+patchwork::wrap_plots(plots, ncol = 4)
+```
+
+```{r nmf_save5, message=F, warning=F, eval=F, include=F}
+pdf(
+  file.path(outputDir_plots, "MPs_vs_pseudotime.pdf"),
+  width = 175 / 25.4,
+  height = 150 / 25.4
+)
+
+patchwork::wrap_plots(plots, ncol = 4)
+dev.off()
+```
