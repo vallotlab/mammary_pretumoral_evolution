@@ -1,0 +1,1078 @@
+---
+title: "5.1 scMultiome preprocessing and annotation"
+author: "Anna Schwager"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r silence, include=FALSE, message=F, warning=F}
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  fig.show = "hold"
+)
+```
+
+
+# Python setup
+```{r reticulate, message=F, warning=F}
+
+library(reticulate)
+use_condaenv(
+  "snap_py310",
+  conda = "/Users/annaschwager/miniforge3/bin/conda",
+  required = TRUE
+)
+
+```
+
+```{python check-python, message=F, warning=F}
+import sys
+import numpy as np
+import pandas as pd
+from pathlib import Path
+import scanpy as sc
+import snapatac2 as snap
+import skmisc
+
+```
+
+# R setup
+```{r source, message=F, warning=F}
+
+here::i_am("scripts/5.1_scMultiome_PreProcess_Annotation.Rmd")
+mainDir = here::here()
+
+set.seed(123)
+```
+
+```{r libraries_new, message=F, warning=F}
+library(Signac)
+library(Seurat)
+library(harmony)
+library(EnsDb.Mmusculus.v79)
+library(org.Mm.eg.db)
+library(tidyverse)
+library(biovizBase)
+library(ggsci)
+library(scales)
+library(pheatmap)
+library(grid)
+library(gridExtra)
+library(rlang)
+library(ggpointdensity)
+library(tidytext)
+library(patchwork)
+library(GenomeInfoDb)
+library(SingleCellExperiment)
+library(ComplexHeatmap)
+library(destiny)
+library(ggalluvial)
+library(ggrepel)
+library(dplyr)
+library(qs)
+library(circlize)
+library(GeneNMF)
+library(UCell)
+```
+
+# Setting directories and input files
+```{r dir}
+mainDir = here::here()
+inputDir =  file.path(mainDir,"input") 
+outputDir = file.path(mainDir, "output")
+annotDir = file.path(mainDir, "annotation")
+
+outputDir_local = file.path(outputDir, "epigenomic_diffusion") ; if(!file.exists(outputDir_local)){dir.create(outputDir_local)}
+outputDir_objects = file.path(outputDir_local, "objects") ; if(!file.exists(outputDir_objects)){dir.create(outputDir_objects)}
+outputDir_plots = file.path(outputDir_local, "plots") ; if(!file.exists(outputDir_plots)){dir.create(outputDir_plots)}
+outputDir_tables = file.path(outputDir_local, "tables") ; if(!file.exists(outputDir_tables)){dir.create(outputDir_tables)}
+
+snap_dir <- file.path(outputDir_objects, "snap_export") ; if(!file.exists(snap_dir )){dir.create(snap_dir)}
+```
+
+# Set colors
+```{r col}
+mypal <- c("#4eb7b4","#F9C22EFF","#e4722c", "#c94c9d", "#5c4d7d", "#469D76FF", "#f7dcad", "#3C4B99FF", "#DF9ED4FF", "#C93F55FF", "#E59A52FF", "#EDCE79FF", "pink", "grey", "#92C051FF")
+
+cell_cols <- c(
+  basal   = "#236ec4",
+  luminal = "#ac0000",
+  LP      = "#a3215e",
+  HS      = "#F9C22EFF",
+  Alv     = "#f7dcad"
+)
+
+group_cols <- c(CreP_EARLY = "#c0d69f", 
+                CreP_LATE = "#61980e",
+                CreN = "#5c4d7d",
+                Rosa = "#c94c9d")
+
+```
+
+# Load annotation
+```{r load_annot, message=F, warning=F}
+ref_inhouse <- read.delim(file.path(annotDir, "Landragin2025_CreN_mammary_gland_markers.txt"))
+ref_visvader <- read.delim(file.path(annotDir, "Visvader2010_mammary_gland_markers.txt"))
+```
+
+
+# Load final clean object
+Object are aready clean and quality-filtered
+```{r load, message=F, warning=F, eval=F}
+# Multi-modal object with all epi cells and a subset of RNA cells
+seurat <- qread(file.path(outputDir_objects, "seurat_merged_final.qs"))
+# RNA-only object with all RNA cells
+seurat_rna <- qread(file.path(outputDir_objects, "seurat_merged_rna_final.qs"))
+```
+
+
+# Exporting data from Seurat to SnapATAC2
+## RNA
+```{r snap1, message=F, warning=F, eval=F}
+seurat <- JoinLayers(seurat, assay = "RNA_umi")
+rna_assay <- GetAssayData(seurat, assay = "RNA_umi", layer = "counts")
+
+Matrix::writeMM(rna_assay, file.path(snap_dir, "matrix_rna_umi.mtx"))
+write.table(colnames(rna_assay), file.path(snap_dir, "barcodes_rna_umi.tsv"),
+            quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+
+genes_df <- data.frame(
+  name  = rownames(rna_assay),
+  stringsAsFactors = FALSE
+)
+write.table(genes_df, file.path(snap_dir, "features_rna_umi.tsv"),
+            quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+```
+
+RNA only object
+```{r snap2, message=F, warning=F, eval=F}
+seurat_rna <- JoinLayers(seurat_rna, assay = "RNA_umi")
+rna_assay_rna <- GetAssayData(seurat_rna, assay = "RNA_umi", layer = "counts")
+
+Matrix::writeMM(rna_assay_rna, file.path(snap_dir, "matrix_rna_umi_rna.mtx"))
+write.table(colnames(rna_assay_rna), file.path(snap_dir, "barcodes_rna_umi_rna.tsv"),
+            quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+
+genes_df_rna <- data.frame(
+  name  = rownames(rna_assay_rna),
+  stringsAsFactors = FALSE
+)
+write.table(genes_df_rna, file.path(snap_dir, "features_rna_umi_rna.tsv"),
+            quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+```
+
+## H3K4me1
+```{r snap3, message=F, warning=F, eval=F}
+k4_assay <- GetAssayData(seurat, assay = "bin_5k_h3k4me1", layer = "counts")
+
+Matrix::writeMM(k4_assay, file.path(snap_dir, "matrix_k4.mtx"))
+write.table(colnames(k4_assay), file.path(snap_dir, "barcodes_k4.tsv"),
+            quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+
+
+bins_df <- data.frame(
+  name = rownames(k4_assay),
+  stringsAsFactors = FALSE
+)
+
+bins_df$chrom <- sub("-.*", "", bins_df$name)
+bins_df$start <- as.integer(sub("^chr[^-]+-(\\d+)-.*", "\\1", bins_df$name))
+bins_df$end   <- as.integer(sub("^chr[^-]+-\\d+-(\\d+)$", "\\1", bins_df$name))
+
+bins_df <- bins_df[, c("chrom", "start", "end", "name")]
+
+write.table(
+  bins_df,
+  file.path(snap_dir, "features_k4.tsv"),
+  quote = FALSE,
+  sep = "\t",
+  row.names = FALSE,
+  col.names = TRUE
+)
+```
+
+## H3K27me3
+```{r snap4, message=F, warning=F, eval=F}
+
+k27_assay <- GetAssayData(seurat, assay = "bin_5k_h3k27me3", layer = "counts")
+
+Matrix::writeMM(k27_assay, file.path(snap_dir, "matrix_k27.mtx"))
+write.table(colnames(k27_assay), file.path(snap_dir, "barcodes_k27.tsv"),
+            quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+
+
+bins_df <- data.frame(
+  name  = rownames(k27_assay),
+  stringsAsFactors = FALSE
+)
+
+bins_df$chrom <- sub("-.*", "", bins_df$name)
+bins_df$start <- as.integer(sub("^chr[^-]+-(\\d+)-.*", "\\1", bins_df$name))
+bins_df$end   <- as.integer(sub("^chr[^-]+-\\d+-(\\d+)$", "\\1", bins_df$name))
+
+bins_df <- bins_df[, c("chrom", "start", "end", "name")]
+
+write.table(bins_df, file.path(snap_dir, "features_k27.tsv"),
+            quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+```
+
+# Spectral embeddings generation
+## UMI RNA
+Multi-modal object
+```{python snap5, message=F, warning=F, eval=F}
+
+snap_dir = Path(r.snap_dir) 
+X = sc.read_mtx(snap_dir / "matrix_rna_umi.mtx").X.tocsr().transpose()
+barcodes = pd.read_csv(snap_dir / "barcodes_rna_umi.tsv",
+                       header=None, sep="\t")[0].values
+feat = pd.read_csv(snap_dir / "features_rna_umi.tsv", sep="\t")
+
+adata_rna = sc.AnnData(X=X)
+adata_rna.obs_names = barcodes
+adata_rna.var_names = feat["name"].values
+adata_rna.X = adata_rna.X.tocsr().astype(np.float64)
+
+adata_rna
+```
+
+```{python snap6, message=F, warning=F, eval=F}
+sc.pp.highly_variable_genes(adata_rna, flavor='seurat_v3', n_top_genes=3000)
+adata_rna = adata_rna[:, adata_rna.var.highly_variable]
+
+sc.pp.normalize_total(adata_rna, target_sum=1e4)
+sc.pp.log1p(adata_rna)
+
+adata_rna
+```
+
+```{python snap7, message=F, warning=F, eval=F}
+snap.tl.spectral(adata_rna, features=None)
+```
+
+RNA only object
+```{python snap8, message=F, warning=F, eval=F}
+snap_dir = Path(r.snap_dir) 
+X_rna = sc.read_mtx(snap_dir / "matrix_rna_umi_rna.mtx").X.tocsr().transpose()
+barcodes_rna = pd.read_csv(snap_dir / "barcodes_rna_umi_rna.tsv",
+                       header=None, sep="\t")[0].values
+feat_rna = pd.read_csv(snap_dir / "features_rna_umi_rna.tsv", sep="\t")
+
+adata_rna_rna = sc.AnnData(X=X_rna)
+adata_rna_rna.obs_names = barcodes_rna
+adata_rna_rna.var_names = feat_rna["name"].values
+adata_rna_rna.X = adata_rna_rna.X.tocsr().astype(np.float64)
+
+adata_rna_rna
+```
+
+```{python snap9, message=F, warning=F, eval=F}
+sc.pp.highly_variable_genes(adata_rna_rna, flavor='seurat_v3', n_top_genes=3000)
+adata_rna_rna = adata_rna_rna[:, adata_rna_rna.var.highly_variable]
+
+sc.pp.normalize_total(adata_rna_rna, target_sum=1e4)
+sc.pp.log1p(adata_rna_rna)
+
+adata_rna_rna
+```
+
+```{python snap10, message=F, warning=F, eval=F}
+snap.tl.spectral(adata_rna_rna, features=None)
+```
+
+## H3K4me1
+```{python snap11, message=F, warning=F, eval=F}
+snap_dir = Path(r.snap_dir) 
+X = sc.read_mtx(snap_dir / "matrix_k4.mtx").X.tocsr().transpose()  
+barcodes = pd.read_csv(snap_dir / "barcodes_k4.tsv", header=None, sep="\t")[0].values
+feat = pd.read_csv(snap_dir / "features_k4.tsv", sep="\t")
+
+adata_k4 = sc.AnnData(X=X)
+adata_k4.obs_names = barcodes
+adata_k4.var_names = feat["name"].values
+adata_k4.var["chrom"] = feat["chrom"].values
+adata_k4.var["start"] = feat["start"].values
+adata_k4.var["end"]   = feat["end"].values
+
+adata_k4.X = adata_k4.X.tocsr().astype(np.float64)
+adata_k4
+```
+
+```{python snap12, message=F, warning=F, eval=F}
+snap.pp.select_features(adata_k4, n_features = 300000)
+snap.tl.spectral(adata_k4, features = 'selected', distance_metric='cosine')
+```
+
+## H3K27me3
+```{python snap13, message=F, warning=F, eval=F}
+snap_dir = Path(r.snap_dir) 
+X = sc.read_mtx(snap_dir / "matrix_k27.mtx").X.tocsr().transpose()  
+barcodes = pd.read_csv(snap_dir / "barcodes_k27.tsv", header=None, sep="\t")[0].values
+feat = pd.read_csv(snap_dir / "features_k27.tsv", sep="\t")
+
+adata_k27 = sc.AnnData(X=X)
+adata_k27.obs_names = barcodes
+adata_k27.var_names = feat["name"].values
+adata_k27.var["chrom"] = feat["chrom"].values
+adata_k27.var["start"] = feat["start"].values
+adata_k27.var["end"]   = feat["end"].values
+
+adata_k27.X = adata_k27.X.tocsr().astype(np.float64)
+adata_k27
+```
+
+```{python snap14, message=F, warning=F, eval=F}
+snap.pp.select_features(adata_k27, n_features = 300000)
+snap.tl.spectral(adata_k27, features = 'selected', distance_metric='cosine')
+```
+
+# Import embeddings to Seurat
+```{r import1, message=F, warning=F, eval=F}
+emb_rna <- as.matrix(py$adata_rna$obsm[["X_spectral"]])
+rownames(emb_rna) <- py$adata_rna$obs_names$tolist()
+
+emb_rna_rna <- as.matrix(py$adata_rna_rna$obsm[["X_spectral"]])
+rownames(emb_rna_rna) <- py$adata_rna_rna$obs_names$tolist()
+
+emb_k4 <- as.matrix(py$adata_k4$obsm[["X_spectral"]])
+rownames(emb_k4) <- py$adata_k4$obs_names$tolist()
+
+emb_k27 <- as.matrix(py$adata_k27$obsm[["X_spectral"]])
+rownames(emb_k27) <- py$adata_k27$obs_names$tolist()
+
+```
+
+```{r import2, message=F, warning=F, eval=F}
+seurat[["spectral_rna_umi"]] <- CreateDimReducObject(
+  embeddings = emb_rna,
+  key       = "specrnaumi_",
+  assay     = "RNA_umi" 
+)
+
+seurat_rna[["spectral_rna_umi"]] <- CreateDimReducObject(
+  embeddings = emb_rna_rna,
+  key       = "specrnaumi_",
+  assay     = "RNA_umi" 
+)
+
+seurat[["spectral_k4"]] <- CreateDimReducObject(
+  embeddings = emb_k4,
+  key       = "speck4_",
+  assay     = "bin_5k_h3k4me1"
+)
+
+seurat[["spectral_k27"]] <- CreateDimReducObject(
+  embeddings = emb_k27,
+  key       = "speck27_",
+  assay     = "bin_5k_h3k27me3"
+)
+
+```
+
+# Reload step 1
+```{r save_step1, message=F, warning=F, eval=F}
+qsave(seurat, file.path(outputDir_objects, "seurat_step1.qs"))
+qsave(seurat_rna, file.path(outputDir_objects, "seurat_rna_step1.qs"))
+```
+
+```{r load_step1, message=F, warning=F}
+seurat <- qread(file.path(outputDir_objects, "seurat_step1.qs"))
+seurat_rna <- qread(file.path(outputDir_objects, "seurat_rna_step1.qs"))
+
+```
+
+# RNA clustering
+## SCT transform
+```{r SCT, message=F, warning=F}
+seurat <- SCTransform(seurat, assay = "RNA_umi", new.assay.name = "SCT_umi", vars.to.regress = c("nCount_RNA_umi"))
+
+seurat_rna <- SCTransform(seurat_rna, assay = "RNA_umi", new.assay.name = "SCT_umi", vars.to.regress = c("nCount_RNA_umi"))
+
+```
+
+Multimodal object
+```{r umpap1, message=F, warning=F}
+seurat <- RunUMAP(seurat,
+                  assay = "RNA_umi",
+                  seed.use = 42,
+                  dims = 1:length(colnames(seurat@reductions[["spectral_rna_umi"]])),
+                  reduction = "spectral_rna_umi",
+                  reduction.name = "UMAP_spectral_rna_umi")
+
+seurat <- FindNeighbors(seurat,
+                        reduction = "spectral_rna_umi",
+                        cluster.name = "spectral_rna_umi_clusters",
+                        graph.name = "spectral_rna_umi_snn",
+                        k.param = 8)
+
+seurat <- FindClusters(seurat,
+                       graph.name   = "spectral_rna_umi_snn",
+                       resolution = 0.05,
+                       cluster.name = "spectral_rna_umi_clusters",
+                       algorithm = 4)
+
+```
+
+```{r umap, message=F, warning=F}
+DimPlot(seurat, cols = mypal,
+        reduction = "UMAP_spectral_rna_umi",
+        group.by = c("Exp",  "Group"),
+        combine = TRUE)
+
+DimPlot(seurat, cols = mypal,
+        reduction = "UMAP_spectral_rna_umi",
+        group.by = c("spectral_rna_umi_clusters", "facs_phenotype"),
+        combine = TRUE)
+
+FeaturePlot(seurat, reduction = "UMAP_spectral_rna_umi", feature = "percent.mt")
+
+```
+
+
+RNA only object
+```{r umap2, message=F, warning=F}
+seurat_rna <- RunUMAP(seurat_rna,
+                  assay = "RNA_umi",
+                  seed.use = 42,
+                  dims = 1:length(colnames(seurat_rna@reductions[["spectral_rna_umi"]])),
+                  reduction = "spectral_rna_umi",
+                  reduction.name = "UMAP_spectral_rna_umi")
+
+seurat_rna <- FindNeighbors(seurat_rna,
+                        reduction = "spectral_rna_umi",
+                        cluster.name = "spectral_rna_umi_clusters",
+                        graph.name = "spectral_rna_umi_snn",
+                        k.param = 15)
+
+seurat_rna <- FindClusters(seurat_rna,
+                       graph.name   = "spectral_rna_umi_snn",
+                       resolution = 0.05,
+                       cluster.name = "spectral_rna_umi_clusters",
+                       algorithm = 4)
+
+```
+
+```{r umap3, message=F, warning=F}
+DimPlot(seurat_rna, cols = mypal,
+        reduction = "UMAP_spectral_rna_umi",
+        group.by = c("Exp",  "Group"),
+        combine = TRUE)
+
+DimPlot(seurat_rna, cols = mypal,
+        reduction = "UMAP_spectral_rna_umi",
+        group.by = c("spectral_rna_umi_clusters", "facs_phenotype"),
+        combine = TRUE)
+
+```
+
+## Batch correction
+Multimodal object
+```{r batch_rna, message=F, warning=F}
+seurat <- RunHarmony(
+  object        = seurat,
+  group.by.vars = c("model"),
+  reduction.use = "spectral_rna_umi",
+  reduction.save = "spectral_rna_umi_harmony",
+  project.dim    = FALSE,
+  plot_convergence = TRUE,
+  theta            = 1,
+  lambda           = NULL,
+  sigma = 0.06
+)
+```
+
+RNA only object
+```{r batch_rna2, message=F, warning=F}
+seurat_rna <- RunHarmony(
+  object        = seurat_rna,
+  group.by.vars = c("model"),
+  reduction.use = "spectral_rna_umi",
+  reduction.save = "spectral_rna_umi_harmony",
+  project.dim    = FALSE,
+  plot_convergence = TRUE,
+  theta            = 1,
+  lambda           = NULL,
+  sigma = 0.06
+)
+
+```
+
+## Reclustering post batch-correction
+Multimodal object
+```{r cluster1, message=F, warning=F}
+seurat <- RunUMAP(seurat,
+                  assay = "RNA_umi",
+                  seed.use = 172,
+                  metric = "cosine",
+                  n.neighbors = 60,
+                  min.dist = 0.3,
+                  spread = 1.5,
+                  dims = 1:length(colnames(seurat@reductions[["spectral_rna_umi_harmony"]])),
+                  reduction = "spectral_rna_umi_harmony",
+                  reduction.name = "UMAP_spectral_rna_umi_harmony")
+
+seurat <- FindNeighbors(seurat,
+                        reduction = "spectral_rna_umi_harmony",
+                        cluster.name = "spectral_rna_umi_harmony_clusters",
+                        graph.name = "spectral_rna_umi_harmony_snn",
+                        k.param = 8)
+
+seurat <- FindClusters(seurat,
+                       graph.name   = "spectral_rna_umi_harmony_snn",
+                       resolution = 0.05,
+                       cluster.name = "spectral_rna_umi_harmony_clusters",
+                       algorithm = 4)
+
+```
+
+
+```{r cluster2, message=F, warning=F}
+DimPlot(seurat, cols = mypal,
+        reduction = "UMAP_spectral_rna_umi_harmony",
+        group.by = c("Exp", "Group"),
+        combine = TRUE)
+
+DimPlot(seurat, cols = mypal,
+        reduction = "UMAP_spectral_rna_umi_harmony",
+        group.by = c("spectral_rna_umi_harmony_clusters","facs_phenotype"),
+        combine = TRUE)
+
+```
+
+RNA only object
+```{r cluster3, message=F, warning=F}
+seurat_rna <- RunUMAP(seurat_rna,
+                  assay = "RNA_umi",
+                  seed.use = 42,
+                  metric = "cosine",
+                  n.neighbors = 60,
+                  min.dist = 0.5,
+                  spread = 1.1,
+                  dims = 1:length(colnames(seurat_rna@reductions[["spectral_rna_umi_harmony"]])),
+                  reduction = "spectral_rna_umi_harmony",
+                  reduction.name = "UMAP_spectral_rna_umi_harmony")
+
+seurat_rna <- FindNeighbors(seurat_rna,
+                        reduction = "spectral_rna_umi_harmony",
+                        cluster.name = "spectral_rna_umi_harmony_clusters",
+                        graph.name = "spectral_rna_umi_harmony_snn",
+                        k.param = 15)
+
+seurat_rna <- FindClusters(seurat_rna,
+                       graph.name   = "spectral_rna_umi_harmony_snn",
+                       resolution = 0.05,
+                       cluster.name = "spectral_rna_umi_harmony_clusters",
+                       algorithm = 4)
+
+```
+
+
+```{r cluster4, message=F, warning=F}
+DimPlot(seurat_rna, cols = mypal,
+        reduction = "UMAP_spectral_rna_umi_harmony",
+        group.by = c("Exp", "Group"),
+        combine = TRUE)
+
+#CellFateRNA - annotation from MutantAlv script
+DimPlot(seurat_rna, cols = mypal,
+        reduction = "UMAP_spectral_rna_umi_harmony",
+        group.by = c("spectral_rna_umi_harmony_clusters","CellFate_RNA"),
+        combine = TRUE)
+
+```
+
+## Cell type scores
+```{r scores1, message=F, warning=F}
+AddCellTypeScore <- function(seurat_obj,
+                             marker_table,
+                             cell_type,
+                             assay = "SCT_umi",
+                             slot = "data",
+                             score_name = "cell_type_score") {
+  marker_genes <- marker_table %>%
+    filter(Type == cell_type) %>%
+    pull(Gene) %>%
+    unique()
+  
+  expr_matrix <- GetAssayData(seurat_obj, assay = assay, layer = slot)
+  
+  marker_genes_present <- intersect(marker_genes, rownames(expr_matrix))
+  
+  if (length(marker_genes_present) == 0) {
+    warning(paste0("No marker genes found in assay for cell type: ", cell_type))
+    seurat_obj[[score_name]] <- NA
+    return(seurat_obj)
+  }
+  
+  score_vector <- Matrix::colMeans(expr_matrix[marker_genes_present, , drop = FALSE])
+  
+  seurat_obj[[score_name]] <- score_vector
+  
+  return(seurat_obj)
+}
+
+```
+
+Landragin
+```{r scores2, message=F, warning=F}
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_inhouse,
+                 cell_type = "Basal",
+                 assay = "SCT_umi",
+                 score_name = "basal_score_Landragin")
+
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_inhouse,
+                 cell_type = "Luminal H-S",
+                 assay = "SCT_umi",
+                 score_name = "hs_score_Landragin")
+
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_inhouse,
+                 cell_type = "LP",
+                 assay = "SCT_umi",
+                 score_name = "lp_score_Landragin")
+
+seurat_rna <- AddCellTypeScore(seurat_obj = seurat_rna,
+                 marker_table = ref_inhouse,
+                 cell_type = "Basal",
+                 assay = "SCT_umi",
+                 score_name = "basal_score_Landragin")
+
+seurat_rna <- AddCellTypeScore(seurat_obj = seurat_rna,
+                 marker_table = ref_inhouse,
+                 cell_type = "Luminal H-S",
+                 assay = "SCT_umi",
+                 score_name = "hs_score_Landragin")
+
+seurat_rna <- AddCellTypeScore(seurat_obj = seurat_rna,
+                 marker_table = ref_inhouse,
+                 cell_type = "LP",
+                 assay = "SCT_umi",
+                 score_name = "lp_score_Landragin")
+
+```
+
+Visvader
+```{r scores3, message=F, warning=F}
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_visvader,
+                 cell_type = "Basal",
+                 assay = "SCT_umi",
+                 score_name = "basal_score_Visvader")
+
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_visvader,
+                 cell_type = "Luminal H-S",
+                 assay = "SCT_umi",
+                 score_name = "hs_score_Visvader")
+
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_visvader,
+                 cell_type = "LP",
+                 assay = "SCT_umi",
+                 score_name = "lp_score_Visvader")
+
+seurat_rna <- AddCellTypeScore(seurat_obj = seurat_rna,
+                 marker_table = ref_visvader,
+                 cell_type = "Basal",
+                 assay = "SCT_umi",
+                 score_name = "basal_score_Visvader")
+
+seurat_rna  <- AddCellTypeScore(seurat_obj = seurat_rna,
+                 marker_table = ref_visvader,
+                 cell_type = "Luminal H-S",
+                 assay = "SCT_umi",
+                 score_name = "hs_score_Visvader")
+
+seurat_rna  <- AddCellTypeScore(seurat_obj = seurat_rna,
+                 marker_table = ref_visvader,
+                 cell_type = "LP",
+                 assay = "SCT_umi",
+                 score_name = "lp_score_Visvader")
+
+```
+
+
+```{r scores4, message=F, warning=F}
+VlnPlot(seurat, c("basal_score_Landragin", "lp_score_Landragin", "hs_score_Landragin"),
+                   group.by = c("spectral_rna_umi_harmony_clusters"), pt.size = 0.5,
+                   cols = c("#a3215e", "#236ec4", "#F9C22EFF")) +
+                   stat_summary(fun.y = median, geom='point', size = 2, colour = "black", position = position_dodge(width = 0.9))
+
+VlnPlot(seurat, c("basal_score_Visvader", "lp_score_Visvader", "hs_score_Visvader"),
+                   group.by = c("spectral_rna_umi_harmony_clusters"), pt.size = 0.5,
+                   cols = c("#a3215e", "#236ec4", "#F9C22EFF")) +
+                   stat_summary(fun.y = median, geom='point', size = 2, colour = "black", position = position_dodge(width = 0.9)) 
+
+VlnPlot(seurat_rna, c("basal_score_Landragin", "lp_score_Landragin", "hs_score_Landragin"),
+                   group.by = c("spectral_rna_umi_harmony_clusters"), pt.size = 0.5,
+                   cols = c("#a3215e", "#236ec4", "#F9C22EFF")) +
+                   stat_summary(fun.y = median, geom='point', size = 2, colour = "black", position = position_dodge(width = 0.9))
+
+VlnPlot(seurat_rna, c("basal_score_Visvader", "lp_score_Visvader", "hs_score_Visvader"),
+                   group.by = c("spectral_rna_umi_harmony_clusters"), pt.size = 0.5,
+                   cols = c("#a3215e", "#236ec4", "#F9C22EFF")) +
+                   stat_summary(fun.y = median, geom='point', size = 2, colour = "black", position = position_dodge(width = 0.9)) 
+
+```
+
+## RNA annotation
+Multimodal object
+```{r annot1, message=F, warning=F}
+tmp_vector <- as.character(seurat$`spectral_rna_umi_harmony_clusters`)
+
+seurat$annot_rna_joint <- dplyr::case_when(
+  tmp_vector == "1" ~ "LP",
+  tmp_vector == "2" ~ "basal",
+  tmp_vector == "3" ~ "HS",
+  TRUE ~ NA_character_
+)
+
+seurat$annot_rna_joint_alv <- dplyr::case_when(
+  trimws(as.character(seurat$CellFate_RNA)) == "Alv" ~ "Alv",
+  TRUE ~ as.character(seurat$annot_rna_joint)
+)
+
+```
+
+
+```{r annot2, message=F, warning=F}
+DimPlot(seurat, cols = cell_cols,
+        reduction = "UMAP_spectral_rna_umi_harmony",
+        group.by = c("annot_rna_joint", "annot_rna_joint_alv"),
+        combine = TRUE)
+```
+
+RNA only object
+```{r annot3, message=F, warning=F}
+tmp_vector <- as.character(seurat_rna$`spectral_rna_umi_harmony_clusters`)
+
+seurat_rna$annot_rna_joint <- dplyr::case_when(
+  tmp_vector == "1" ~ "LP",
+  tmp_vector == "2" ~ "basal",
+  tmp_vector == "3" ~ "HS",
+  TRUE ~ NA_character_
+)
+
+seurat_rna$annot_rna_joint_alv <- dplyr::case_when(
+  trimws(as.character(seurat_rna$CellFate_RNA)) == "Alv" ~ "Alv",
+  TRUE ~ as.character(seurat_rna$annot_rna_joint)
+)
+
+```
+
+
+```{r annot4, message=F, warning=F}
+DimPlot(seurat_rna, cols = cell_cols,
+        reduction = "UMAP_spectral_rna_umi_harmony",
+        group.by = c("annot_rna_joint", "annot_rna_joint_alv"),
+        combine = TRUE)
+```
+
+# H3K4me1 clustering
+```{r cluster_k4_1, message=F, warning=F}
+seurat <- RunUMAP(seurat,
+                  assay = "bin_5k_h3k4me1",
+                  seed.use = 21,
+                  dims = 1:length(colnames(seurat@reductions[["spectral_k4"]])),
+                  n.neighbors = 35,
+                  min.dist = 0.4,
+                  spread = 2.2,
+                  reduction = "spectral_k4",
+                  reduction.name = "UMAP_spectral_k4")
+
+
+seurat <- FindNeighbors(seurat,
+                        reduction = "spectral_k4",
+                        cluster.name = "spectral_k4_clusters",
+                        graph.name = "spectral_k4_snn",
+                        dims = 1:length(colnames(seurat@reductions[["spectral_k4"]])),
+                        k.param = 20)
+
+seurat <- FindClusters(seurat,
+                       resolution = 0.05,
+                       cluster.name = "spectral_k4_clusters",
+                       graph.name = "spectral_k4_snn",
+                       algorithm = 4)
+
+```
+
+```{r cluster_k4_11, message=F, warning=F}
+DimPlot(seurat, cols = rep(mypal,2),
+        reduction = "UMAP_spectral_k4",
+        group.by = c("Exp", "spectral_k4_clusters", "annot_rna_joint_alv", "Group"),
+        combine = TRUE)
+
+
+FeaturePlot(seurat,
+        reduction = "UMAP_spectral_k4",
+        features = c("log10_fragments", "FRiP"),
+        combine = TRUE)
+
+```
+
+## Cell type scores
+Landragin
+```{r scores_k4_1, message=F, warning=F}
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_inhouse,
+                 cell_type = "Basal",
+                 assay = "ga_h3k4me1",
+                 score_name = "basal_score_Landragin_k4")
+
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_inhouse,
+                 cell_type = "Luminal H-S",
+                 assay = "ga_h3k4me1",
+                 score_name = "hs_score_Landragin_k4")
+
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_inhouse,
+                 cell_type = "LP",
+                 assay = "ga_h3k4me1",
+                 score_name = "lp_score_Landragin_k4")
+
+```
+
+Visvader
+```{r scores_k4_2, message=F, warning=F}
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_visvader,
+                 cell_type = "Basal",
+                 assay = "ga_h3k4me1",
+                 score_name = "basal_score_Visvader_k4")
+
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_visvader,
+                 cell_type = "Luminal H-S",
+                 assay = "ga_h3k4me1",
+                 score_name = "hs_score_Visvader_k4")
+
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_visvader,
+                 cell_type = "LP",
+                 assay = "ga_h3k4me1",
+                 score_name = "lp_score_Visvader_k4")
+
+```
+
+
+```{r scores_k4_3, message=F, warning=F}
+VlnPlot(seurat, c("basal_score_Landragin_k4", "lp_score_Landragin_k4", "hs_score_Landragin_k4"),
+                   group.by = c("spectral_k4_clusters"), pt.size = 0.2,
+                   cols = c("#a3215e", "#236ec4", "#F9C22EFF")) +
+                   stat_summary(fun.y = median, geom='point', size = 2, colour = "black", position = position_dodge(width = 0.9))
+
+VlnPlot(seurat, c("basal_score_Visvader_k4", "lp_score_Visvader_k4", "hs_score_Visvader_k4"),
+                   group.by = c("spectral_k4_clusters"), pt.size = 0.2,
+                   cols = c("#a3215e", "#236ec4", "#F9C22EFF")) +
+                   stat_summary(fun.y = median, geom='point', size = 2, colour = "black", position = position_dodge(width = 0.9)) 
+```
+
+## K4 annotation
+```{r annot_k4_1, message=F, warning=F}
+tmp_vector <- seurat@meta.data[["spectral_k4_clusters"]]
+
+annot_k4_joint <- case_when(
+  tmp_vector == 1 ~ "LP",
+  tmp_vector == 2 ~ "basal",
+  tmp_vector == 3 ~ "HS"
+)
+
+seurat@meta.data[["annot_k4_joint"]] <- annot_k4_joint 
+```
+
+
+```{r annot_k4_2, message=F, warning=F}
+DimPlot(seurat, cols = cell_cols,
+        reduction = "UMAP_spectral_k4",
+        group.by = c("annot_k4_joint", "annot_rna_joint_alv"),
+        combine = TRUE)
+```
+
+# H3K27me3 clustering
+```{r cluster_k27_1, message=F, warning=F}
+seurat <- RunUMAP(seurat,
+                  assay = "bin_5k_h3k27me3",
+                  seed.use = 42,
+                  n.neighbors = 30,
+                  min.dist = 0.1,
+                  spread = 1.5,
+                  dims = 1:length(colnames(seurat@reductions[["spectral_k27"]])),
+                  reduction = "spectral_k27",
+                  reduction.name = "UMAP_spectral_k27")
+            
+seurat <- FindNeighbors(seurat,
+                        reduction = "spectral_k27",
+                        cluster.name = "spectral_k27_clusters",
+                        graph.name = "spectral_k27_snn",
+                        dims = 1:length(colnames(seurat@reductions[["spectral_k27"]])),
+                        k.param = 10)
+
+seurat <- FindClusters(seurat,
+                       resolution = 0.2,
+                       cluster.name = "spectral_k27_clusters",
+                       graph.name = "spectral_k27_snn",
+                       algorithm = 4)
+
+
+```
+
+
+```{r cluster_k27_2, message=F, warning=F}
+DimPlot(seurat, cols = mypal,
+        reduction = "UMAP_spectral_k27",
+        group.by = c("Exp", "spectral_k27_clusters", "annot_rna_joint_alv", "CellFate_CT_h3k27me3_50k"),
+        combine = TRUE)
+
+DimPlot(seurat, cols = mypal,
+        reduction = "UMAP_spectral_k27",
+        group.by = c("Exp", "spectral_k27_clusters", "annot_rna_joint_alv"),
+        combine = TRUE)
+
+
+FeaturePlot(seurat, 
+        reduction = "UMAP_spectral_k27",
+        features = c("log10_fragments", "FRiP"),
+        combine = TRUE)
+
+
+```
+
+## Cell type scores
+Landragin
+```{r score_k27_1, message=F, warning=F}
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_inhouse,
+                 cell_type = "Basal",
+                 assay = "ga_h3k27me3",
+                 score_name = "basal_score_Landragin_k27")
+
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_inhouse,
+                 cell_type = "Luminal H-S",
+                 assay = "ga_h3k27me3",
+                 score_name = "hs_score_Landragin_k27")
+
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_inhouse,
+                 cell_type = "LP",
+                 assay = "ga_h3k27me3",
+                 score_name = "lp_score_Landragin_k27")
+
+```
+
+Visvader
+```{r score_k27_2, message=F, warning=F}
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_visvader,
+                 cell_type = "Basal",
+                 assay = "ga_h3k27me3",
+                 score_name = "basal_score_Visvader_k27")
+
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_visvader,
+                 cell_type = "Luminal H-S",
+                 assay = "ga_h3k27me3",
+                 score_name = "hs_score_Visvader_k27")
+
+seurat <- AddCellTypeScore(seurat_obj = seurat,
+                 marker_table = ref_visvader,
+                 cell_type = "LP",
+                 assay = "ga_h3k27me3",
+                 score_name = "lp_score_Visvader_k27")
+
+```
+
+
+```{r score_k27_3, message=F, warning=F}
+DefaultAssay(seurat) <- "ga_h3k27me3"
+
+VlnPlot(seurat,
+        c("basal_score_Landragin_k27", "lp_score_Landragin_k27", "hs_score_Landragin_k27"),
+        group.by = c("spectral_k27_clusters"),
+        pt.size = 0.2, y.max = 3, 
+        cols = c("#a3215e", "#236ec4", "#a3215e", "#F9C22EFF", "#236ec4")) +
+         stat_summary(fun.y = median, geom='point', size = 2, colour = "black", position = position_dodge(width = 0.9))
+
+VlnPlot(seurat, c("basal_score_Visvader_k27", "lp_score_Visvader_k27", "hs_score_Visvader_k27"),
+                   group.by = c("spectral_k27_clusters"), pt.size = 0.2, y.max = 3,
+                   cols = c("#a3215e", "#236ec4", "#a3215e", "#F9C22EFF", "#236ec4")) +
+                   stat_summary(fun.y = median, geom='point', size = 2, colour = "black", position = position_dodge(width = 0.9))
+
+```
+1 - lp
+2 - basal 
+3 - lp
+4 - hs
+5 - basal 
+
+## K27 annotation
+```{r score_k27_4, message=F, warning=F}
+tmp_vector <- seurat@meta.data[["spectral_k27_clusters"]]
+
+annot_k27_joint <- case_when(
+  tmp_vector == 1 ~ "LP",
+  tmp_vector == 2 ~ "basal",
+  tmp_vector == 3 ~ "LP",
+  tmp_vector == 4 ~ "HS",
+  tmp_vector == 5 ~ "basal",
+)
+
+seurat@meta.data[["annot_k27_joint"]] <- annot_k27_joint 
+```
+
+
+```{r score_k27_5, message=F, warning=F}
+DimPlot(seurat, cols = cell_cols,
+        reduction = "UMAP_spectral_k27",
+        group.by = c("annot_k27_joint", "annot_rna_joint_alv"),
+        combine = TRUE)
+
+```
+
+# Save common meta
+```{save, message=F, warning=F, eval=F}
+meta1 <- seurat@meta.data %>%
+  rownames_to_column("cell")
+
+meta2 <- seurat_rna@meta.data %>%
+  rownames_to_column("cell")
+
+meta_joint <- full_join(meta1, meta2, by = "cell", suffix = c(".seurat", ".rna"))
+
+common_cols <- intersect(colnames(meta1), colnames(meta2))
+common_cols <- setdiff(common_cols, "cell")
+
+for (cn in common_cols) {
+  col_seurat <- paste0(cn, ".seurat")
+  col_rna    <- paste0(cn, ".rna")
+  
+  meta_joint[[cn]] <- dplyr::coalesce(meta_joint[[col_rna]], meta_joint[[col_seurat]])
+}
+
+meta_joint <- meta_joint %>%
+  select(
+    cell,
+    all_of(common_cols),
+    everything(),
+    -ends_with(".seurat"),
+    -ends_with(".rna")
+  ) %>%
+  column_to_rownames("cell")
+
+write.csv(meta_joint, file.path(outputDir_tables, "metadata_joint_step2.csv"))
+```
+
+
+# Reload step 2
+```{save2, message=F, warning=F, eval=F}
+qsave(seurat, file.path(outputDir_objects, "seurat_step2.qs"))
+qsave(seurat_rna, file.path(outputDir_objects, "seurat_rna_step2.qs"))
+
+```
+
