@@ -1,0 +1,896 @@
+---
+title: "5.2 Diffusion and pseudotime analysis"
+author: "Anna Schwager"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r silence, include=FALSE, message=F, warning=F}
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  fig.show = "hold"
+)
+```
+
+# Python setup
+```{r reticulate, message=F, warning=F}
+
+library(reticulate)
+use_condaenv(
+  "snap_py310",
+  conda = "/Users/annaschwager/miniforge3/bin/conda",
+  required = TRUE
+)
+
+```
+
+```{python check-python, message=F, warning=F}
+
+import sys
+import numpy as np
+import pandas as pd
+from pathlib import Path
+import scanpy as sc
+import snapatac2 as snap
+import skmisc
+
+```
+
+# R setup
+```{r source, message=F, warning=F}
+
+here::i_am("scripts/5.2_scMultiome_DiffusionPseudotime.Rmd")
+mainDir = here::here()
+
+set.seed(123)
+```
+
+```{r libraries_new, message=F, warning=F}
+library(Signac)
+library(Seurat)
+library(harmony)
+library(EnsDb.Mmusculus.v79)
+library(org.Mm.eg.db)
+library(tidyverse)
+library(biovizBase)
+library(ggsci)
+library(scales)
+library(pheatmap)
+library(grid)
+library(gridExtra)
+library(rlang)
+library(ggpointdensity)
+library(tidytext)
+library(patchwork)
+library(GenomeInfoDb)
+library(SingleCellExperiment)
+library(ComplexHeatmap)
+library(destiny)
+library(ggalluvial)
+library(ggrepel)
+library(dplyr)
+library(qs)
+library(circlize)
+library(GeneNMF)
+library(UCell)
+```
+
+# Setting directories and input files
+```{r dir, message=F, warning=F}
+mainDir = here::here()
+inputDir =  file.path(mainDir,"input") 
+outputDir = file.path(mainDir, "output")
+annotDir = file.path(mainDir, "annotation")
+
+outputDir_local = file.path(outputDir, "epigenomic_diffusion") ; if(!file.exists(outputDir_local)){dir.create(outputDir_local)}
+outputDir_objects = file.path(outputDir_local, "objects") ; if(!file.exists(outputDir_objects)){dir.create(outputDir_objects)}
+outputDir_plots = file.path(outputDir_local, "plots") ; if(!file.exists(outputDir_plots)){dir.create(outputDir_plots)}
+outputDir_tables = file.path(outputDir_local, "tables") ; if(!file.exists(outputDir_tables)){dir.create(outputDir_tables)}
+
+snap_dir <- file.path(outputDir_objects, "snap_export") ; if(!file.exists(snap_dir )){dir.create(snap_dir)}
+```
+
+# Set colors
+```{r col, message=F, warning=F}
+mypal <- c("#4eb7b4","#F9C22EFF","#e4722c", "#c94c9d", "#5c4d7d", "#469D76FF", "#f7dcad", "#3C4B99FF", "#DF9ED4FF", "#C93F55FF", "#E59A52FF", "#EDCE79FF", "pink", "grey", "#92C051FF")
+
+cell_cols <- c(
+  basal   = "#236ec4",
+  luminal = "#ac0000",
+  LP      = "#a3215e",
+  HS      = "#F9C22EFF",
+  Alv     = "#f7dcad"
+)
+
+group_cols <- c(CreP_EARLY = "#c0d69f", 
+                CreP_LATE = "#61980e",
+                CreN = "#5c4d7d",
+                Rosa = "#c94c9d")
+
+```
+
+# Load step 2 object
+```{r load, message=F, warning=F}
+seurat <- qread(file.path(outputDir_objects, "seurat_step2.qs"))
+seurat_rna <- qread(file.path(outputDir_objects, "seurat_rna_step2.qs"))
+```
+
+# Downsampling the highly-covered exps
+```{r downsample1, message=F, warning=F, eval=FALSE}
+downsample_chrom_assay <- function(
+  object,
+  assay = "bin_5k_h3k4me1",
+  sample_col = "Exp",
+  samples_to_downsample,
+  fractions,
+  seed = 42,
+  layer = "counts",
+  new_meta_col = "nCount_downsampled",
+  overwrite_nCount = FALSE,
+  freq_col = "frequency_count",
+  freq_threshold = NULL,
+  freq_direction = ">",
+  verbose = TRUE
+) {
+  if (is.null(names(fractions))) {
+    stop("fractions must be a named vector")
+  }
+  
+  if (!all(samples_to_downsample %in% names(fractions))) {
+    stop(
+      "Missing fractions for: ",
+      paste(setdiff(samples_to_downsample, names(fractions)), collapse = ", ")
+    )
+  }
+  
+  if (!is.null(freq_threshold) && !freq_col %in% colnames(object@meta.data)) {
+    stop("Metadata column not found: ", freq_col)
+  }
+  
+  if (!freq_direction %in% c(">", ">=", "<", "<=")) {
+    stop("freq_direction must be one of: '>', '>=', '<', '<='")
+  }
+  
+  set.seed(seed)
+  
+  counts <- GetAssayData(object = object, assay = assay, layer = layer)
+  counts <- as(counts, "dgCMatrix")
+  
+  assay_cells <- colnames(counts)
+  meta_vec <- object[[sample_col, drop = TRUE]]
+  
+  if (length(meta_vec) != ncol(object)) {
+    stop("Metadata column ", sample_col, " does not align with object cells")
+  }
+  
+  for (s in samples_to_downsample) {
+    p <- fractions[[s]]
+    
+    if (length(p) != 1 || is.na(p) || p <= 0 || p > 1) {
+      stop("Invalid fraction for sample ", s, ": ", p)
+    }
+    
+    cells_meta <- colnames(object)[meta_vec == s]
+    
+    if (!is.null(freq_threshold)) {
+      freq_vals <- object[[freq_col, drop = TRUE]][cells_meta]
+      
+      keep <- switch(
+        freq_direction,
+        ">"  = freq_vals >  freq_threshold,
+        ">=" = freq_vals >= freq_threshold,
+        "<"  = freq_vals <  freq_threshold,
+        "<=" = freq_vals <= freq_threshold
+      )
+      
+      keep[is.na(keep)] <- FALSE
+      cells_meta <- cells_meta[keep]
+    }
+    
+    if (length(cells_meta) == 0) {
+      warning("No cells found for sample ", s, " after applying filters")
+      next
+    }
+    
+    idx <- match(cells_meta, assay_cells)
+    idx <- idx[!is.na(idx)]
+    
+    if (length(idx) == 0) {
+      warning("No matching assay cells found for sample: ", s)
+      next
+    }
+    
+    if (verbose) {
+      message(
+        s, ": downsampling ", length(idx),
+        " cells with p = ", p,
+        if (!is.null(freq_threshold)) {
+          paste0(" (", freq_col, " ", freq_direction, " ", freq_threshold, ")")
+        } else {
+          ""
+        }
+      )
+    }
+    
+    mat <- counts[, idx, drop = FALSE]
+    
+    if (length(mat@x) > 0) {
+      mat@x <- as.numeric(rbinom(n = length(mat@x), size = mat@x, prob = p))
+      mat <- Matrix::drop0(mat)
+    }
+    
+    counts[, idx] <- mat
+  }
+  
+  object[[assay]] <- SetAssayData(
+    object = object[[assay]],
+    layer = layer,
+    new.data = counts
+  )
+  
+  ncount_ds <- Matrix::colSums(counts)
+  names(ncount_ds) <- colnames(counts)
+  
+  md <- rep(NA_real_, ncol(object))
+  names(md) <- colnames(object)
+  md[names(ncount_ds)] <- ncount_ds
+  
+  object[[new_meta_col]] <- md
+  
+  if (overwrite_nCount) {
+    object[[paste0("nCount_", assay)]] <- md
+  }
+  
+  return(object)
+}
+
+```
+
+
+```{r downsample2, message=F, warning=F, eval=F}
+seurat_down <- downsample_chrom_assay(
+  object = seurat,
+  assay = "bin_5k_h3k4me1",
+  sample_col = "Exp",
+  samples_to_downsample = c("exp2", "exp3", "exp4", "exp5", "exp6", "exp7"),
+  fractions = c(exp2 = 0.4, exp3 = 0.4, exp4 = 0.4, exp5 = 0.4, exp6 = 0.4, exp7 = 0.3),
+  new_meta_col = "nCount_bin_5k_h3k4me1_downsampled",
+  overwrite_nCount = FALSE,
+  verbose = TRUE,
+  freq_col = "frequency_count",
+  freq_threshold = 4000,
+  freq_direction = ">"
+)
+
+seurat_down$log10_frags_down_k4 <- log10(seurat_down$nCount_bin_5k_h3k4me1_downsampled)
+
+seurat_down@assays[["bin_5k_h3k27me3"]] <- seurat@assays[["bin_5k_h3k27me3"]]
+
+seurat_down <- downsample_chrom_assay(
+  object = seurat_down,
+  assay = "bin_5k_h3k27me3",
+  sample_col = "Exp",
+  samples_to_downsample = c("exp2", "exp3", "exp4", "exp5"),
+  fractions = c(exp2 = 0.2, exp3 = 0.2, exp4 = 0.3, exp5 = 0.3),
+  new_meta_col = "nCount_bin_5k_h3k27me3_downsampled",
+  overwrite_nCount = FALSE,
+  verbose = TRUE,
+  freq_col = "frequency_count",
+  freq_threshold = 3000,
+  freq_direction = ">"
+)
+
+seurat_down$log10_frags_down_k27 <- log10(seurat_down$nCount_bin_5k_h3k27me3_downsampled)
+```
+
+
+```{r downsample3, message=F, warning=F, eval=F}
+DefaultAssay(seurat_down) <- "bin_5k_h3k4me1"
+VlnPlot(seurat_down, features = "log10_frags_down_k4", group.by = "Exp")
+DefaultAssay(seurat_down) <- "bin_5k_h3k27me3"
+VlnPlot(seurat_down, features = "log10_frags_down_k27", group.by = "Exp")
+
+```
+
+# Spectral embedding re-generation on downsampled samples
+## H3K4me1
+```{r spec1, message=F, warning=F, eval=F}
+k4_assay <- GetAssayData(seurat_down, assay = "bin_5k_h3k4me1", layer = "counts")
+
+Matrix::writeMM(k4_assay, file.path(snap_dir, "matrix_k4_down.mtx"))
+write.table(colnames(k4_assay), file.path(snap_dir, "barcodes_k4_down.tsv"),
+            quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+
+bins_df <- data.frame(
+  name  = rownames(k4_assay),
+  stringsAsFactors = FALSE
+)
+
+write.table(bins_df, file.path(snap_dir, "features_k4_down.tsv"),
+            quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+```
+
+```{python spec2, message=F, warning=F, eval=F}
+snap_dir = Path(r.snap_dir) 
+X = sc.read_mtx(snap_dir / "matrix_k4_down.mtx").X.tocsr().transpose()  
+barcodes = pd.read_csv(snap_dir / "barcodes_k4_down.tsv", header=None, sep="\t")[0].values
+feat = pd.read_csv(snap_dir / "features_k4_down.tsv", sep="\t")
+
+adata_k4 = sc.AnnData(X=X)
+adata_k4.obs_names = barcodes
+adata_k4.var_names = feat["name"].values
+adata_k4.var["chrom"] = feat["chrom"].values
+adata_k4.var["start"] = feat["start"].values
+adata_k4.var["end"]   = feat["end"].values
+
+adata_k4.X = adata_k4.X.tocsr().astype(np.float64)
+adata_k4
+```
+
+```{python spec3, message=F, warning=F, eval=F}
+snap.pp.select_features(adata_k4, n_features = 300000)
+snap.tl.spectral(adata_k4, features = 'selected', distance_metric='cosine')
+```
+
+```{r spec4, message=F, warning=F, eval=F}
+emb_k4 <- as.matrix(py$adata_k4$obsm[["X_spectral"]])
+rownames(emb_k4) <- py$adata_k4$obs_names$tolist()
+
+seurat_down[["spectral_k4"]] <- CreateDimReducObject(
+  embeddings = emb_k4,
+  key       = "speck4_",
+  assay     = "bin_5k_h3k4me1"
+)
+
+```
+
+## H3K27me3
+```{r spec5, message=F, warning=F, eval=F}
+k27_assay <- GetAssayData(seurat_down, assay = "bin_5k_h3k27me3", layer = "counts")
+
+Matrix::writeMM(k27_assay, file.path(snap_dir, "matrix_k27_down.mtx"))
+write.table(colnames(k27_assay), file.path(snap_dir, "barcodes_k27_down.tsv"),
+            quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+
+
+bins_df <- data.frame(
+  name  = rownames(k27_assay),
+  stringsAsFactors = FALSE
+)
+
+write.table(bins_df, file.path(snap_dir, "features_k27_down.tsv"),
+            quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+```
+
+```{python spec6, message=F, warning=F, eval=F}
+snap_dir = Path(r.snap_dir) 
+X = sc.read_mtx(snap_dir / "matrix_k27_down.mtx").X.tocsr().transpose()  
+barcodes = pd.read_csv(snap_dir / "barcodes_k27_down.tsv", header=None, sep="\t")[0].values
+feat = pd.read_csv(snap_dir / "features_k27_down.tsv", sep="\t")
+
+adata_k27 = sc.AnnData(X=X)
+adata_k27.obs_names = barcodes
+adata_k27.var_names = feat["name"].values
+adata_k27.var["chrom"] = feat["chrom"].values
+adata_k27.var["start"] = feat["start"].values
+adata_k27.var["end"]   = feat["end"].values
+
+adata_k27.X = adata_k27.X.tocsr().astype(np.float64)
+adata_k27
+```
+
+```{python spec7, message=F, warning=F, eval=F}
+snap.pp.select_features(adata_k27, n_features = 300000)
+snap.tl.spectral(adata_k27, features = 'selected', distance_metric='cosine')
+```
+
+```{r spec8, message=F, warning=F, eval=F}
+emb_k27 <- as.matrix(py$adata_k27$obsm[["X_spectral"]])
+rownames(emb_k27) <- py$adata_k27$obs_names$tolist()
+
+seurat_down[["spectral_k27"]] <- CreateDimReducObject(
+  embeddings = emb_k27,
+  key       = "speck27_",
+  assay     = "bin_5k_h3k27me3"
+)
+
+```
+
+
+# Reload step 3 (down)
+```{r save, message=F, warning=F, eval=F}
+qsave(seurat_down, file.path(outputDir_objects, "seurat_down_step1.qs"))
+```
+
+```{r reload, message=F, warning=F}
+seurat_down <- qread(file.path(outputDir_objects, "seurat_down_step1.qs"))
+```
+
+
+# H3K4me1 diffusion map and pseudotime
+## Diffusion map - all cells
+```{r diff1, message=F, warning=F}
+X <- Seurat::Embeddings(seurat_down[["spectral_k4"]])[, 1:18]
+dm <- DiffusionMap(X)
+
+dc <- destiny::eigenvectors(dm)
+dc <- as.matrix(dc)
+
+seurat_down[["diffusion_spectral_k4"]] <- Seurat::CreateDimReducObject(
+  embeddings = dc,
+  key = "DIF_",
+  assay = "bin_5k_h3k4me1"
+)
+
+```
+
+```{r diff2, message=F, warning=F}
+
+DimPlot(seurat_down, reduction = "diffusion_spectral_k4", group.by = c("Exp", "annot_rna_joint", "annot_k4_joint", "Group"), cols = mypal, dims = c(1,3))
+
+```
+
+## Global pseudotime 
+```{r dpt1, message=F, warning=F}
+dpt <- DPT(dm)
+```
+
+
+```{r dpt2, message=F, warning=F}
+#plot(dpt, root = 1, paths_to = c(2, 3), col_by = 'branch', dcs = c(1,3))
+
+tip_idx_branch1 <- which(dpt@tips[, 1])
+tip_idx_branch1
+```
+
+```{r dpt3, message=F, warning=F}
+plot(dpt, col_by = 'DPT106', dcs = c(1,3)) 
+plot(dpt, col_by = 'DPT690', dcs = c(1,3)) 
+plot(dpt, col_by = 'DPT9', dcs = c(1,3)) 
+```
+
+Add DPT and metadata to the object
+```{r dpt4, message=F, warning=F}
+
+dpt_global_from_lp <- dpt$DPT106
+names(dpt_global_from_lp) <- rownames(destiny::eigenvectors(dm))
+
+dpt_global_from_basal <- dpt$DPT9
+names(dpt_global_from_basal) <- rownames(destiny::eigenvectors(dm))
+
+dpt_global_from_hs <- dpt$DPT690
+names(dpt_global_from_hs) <- rownames(destiny::eigenvectors(dm))
+
+
+seurat_down <- Seurat::AddMetaData(
+  seurat_down,
+  metadata = dpt_global_from_lp,
+  col.name = "DPT_K4_global_from_lp"
+)
+
+seurat_down <- Seurat::AddMetaData(
+  seurat_down,
+  metadata = dpt_global_from_basal,
+  col.name = "DPT_K4_global_from_basal"
+)
+
+seurat_down <- Seurat::AddMetaData(
+  seurat_down,
+  metadata = dpt_global_from_hs,
+  col.name = "DPT_K4_global_from_hs"
+)
+
+```
+
+
+## Diffusion map - only LP and basal
+```{r dpt5, message=F, warning=F}
+s <- seurat_down
+s@graphs <- list()
+s@neighbors <- list()
+
+DefaultAssay(s) <- "bin_5k_h3k4me1"
+
+s <- subset(
+  s,
+  subset = !(annot_k4_joint %in% c("HS"))
+)
+
+X_BLP <- Seurat::Embeddings(s[["spectral_k4"]])[, 1:18]
+dm_BLP <- DiffusionMap(X_BLP)
+
+dc_BLP <- destiny::eigenvectors(dm_BLP)
+dc_BLP <- as.matrix(dc_BLP)
+
+seurat_down[["diffusion_spectral_k4_BLP"]] <- Seurat::CreateDimReducObject(
+  embeddings = dc_BLP,
+  key = "DIFBLP_",
+  assay = "bin_5k_h3k4me1"
+)
+
+```
+
+```{r dpt55, message=F, warning=F}
+DimPlot(seurat_down, reduction = "diffusion_spectral_k4_BLP", group.by = c("Exp", "annot_rna_joint", "annot_k4_joint", "Group"), cols = mypal)
+
+```
+
+## LP-basal pseudotime
+Calculate DPT
+```{r dpt6, message=F, warning=F}
+dpt_BLP  <- DPT(dm_BLP)
+```
+
+
+```{r dpt66, message=F, warning=F}
+#plot(dpt_BLP, col_by = "branch", dcs = c(1, 2))
+tip_idx_branch1 <- which(dpt_BLP@tips[, 1])
+tip_idx_branch1
+```
+
+DPT from the tip of branch 1 (LP branch)
+```{r dpt7, message=F, warning=F}
+plot(dpt_BLP, col_by = 'DPT1473') # from LP intermediate
+plot(dpt_BLP, col_by = 'DPT86') # from LP extreme
+plot(dpt_BLP, col_by = 'DPT9') # from basal
+
+```
+
+Add DPT and metadata to the object
+```{r dpt8, message=F, warning=F}
+
+dpt_local_from_lp_ext <- dpt_BLP$DPT86
+names(dpt_local_from_lp_ext) <- rownames(destiny::eigenvectors(dm_BLP))
+
+dpt_local_from_lp_int <- dpt_BLP$DPT1473
+names(dpt_local_from_lp_int) <- rownames(destiny::eigenvectors(dm_BLP))
+
+dpt_local_from_basal <- dpt_BLP$DPT9
+names(dpt_local_from_basal) <- rownames(destiny::eigenvectors(dm_BLP))
+
+seurat_down <- Seurat::AddMetaData(
+  seurat_down,
+  metadata = dpt_local_from_lp_ext ,
+  col.name = "DPT_K4_BLP_from_lp_ext"
+)
+
+seurat_down <- Seurat::AddMetaData(
+  seurat_down,
+  metadata = dpt_local_from_lp_int,
+  col.name = "DPT_K4_BLP_from_lp_int"
+)
+
+seurat_down <- Seurat::AddMetaData(
+  seurat_down,
+  metadata = dpt_local_from_basal,
+  col.name = "DPT_K4_BLP_from_basal"
+)
+
+```
+
+
+# H3K27me3 diffusion map and pseudotime
+## Diffusion map - all cells
+```{r dpt9, message=F, warning=F}
+X <- Seurat::Embeddings(seurat_down[["spectral_k27"]])[, 1:length(colnames(seurat@reductions[["spectral_k27"]]))]
+dm <- DiffusionMap(X)
+
+dc <- destiny::eigenvectors(dm)
+dc <- as.matrix(dc)
+
+seurat_down[["diffusion_spectral_k27"]] <- Seurat::CreateDimReducObject(
+  embeddings = dc,
+  key = "DIF_",
+  assay = "bin_5k_h3k27me3"
+)
+```
+
+```{r dpt10, message=F, warning=F}
+
+DimPlot(seurat_down, reduction = "diffusion_spectral_k27", group.by = c("Exp", "annot_rna_joint", "annot_k27_joint", "Group"), cols = mypal, dims = c(1,3))
+
+```
+
+## Global pseudotime 
+```{r dpt11, message=F, warning=F}
+dpt <- DPT(dm)
+```
+
+
+```{r dpt12, message=F, warning=F}
+#plot(dpt, root = 1, paths_to = c(2, 3), col_by = 'branch', dcs = c(1,3))
+tip_idx_branch1 <- which(dpt@tips[, 1])
+tip_idx_branch1
+```
+
+```{r dpt13, message=F, warning=F}
+plot(dpt, col_by = 'DPT69', dcs = c(1,3)) 
+plot(dpt, col_by = 'DPT164', dcs = c(1,3)) 
+plot(dpt, col_by = 'DPT814', dcs = c(1,3)) 
+```
+
+Add DPT and metadata to the object
+```{r dpt14, message=F, warning=F}
+dpt_global_from_lp <- dpt$DPT814
+names(dpt_global_from_lp) <- rownames(destiny::eigenvectors(dm))
+
+dpt_global_from_hs <- dpt$DPT164
+names(dpt_global_from_hs) <- rownames(destiny::eigenvectors(dm))
+
+dpt_global_from_basal <- dpt$DPT69
+names(dpt_global_from_basal) <- rownames(destiny::eigenvectors(dm))
+
+seurat_down <- Seurat::AddMetaData(
+  seurat_down,
+  metadata = dpt_global_from_lp,
+  col.name = "DPT_K27_global_from_lp"
+)
+
+seurat_down <- Seurat::AddMetaData(
+  seurat_down,
+  metadata = dpt_global_from_hs,
+  col.name = "DPT_K27_global_from_hs"
+)
+
+seurat_down <- Seurat::AddMetaData(
+  seurat_down,
+  metadata = dpt_global_from_basal,
+  col.name = "DPT_K27_global_from_basal"
+)
+
+```
+
+
+## Diffusion map - only LP and basal
+```{r diff_lp_b, message=F, warning=F}
+s <- seurat_down
+s@graphs <- list()
+s@neighbors <- list()
+
+s <- subset(
+  s,
+  subset = !(annot_k27_joint %in% c("HS"))
+)
+
+X_BLP <- Seurat::Embeddings(s[["spectral_k27"]])[, 1:length(colnames(seurat@reductions[["spectral_k27"]]))]
+dm_BLP <- DiffusionMap(X_BLP)
+
+dc_BLP <- destiny::eigenvectors(dm_BLP)
+dc_BLP <- as.matrix(dc_BLP)
+
+seurat_down[["diffusion_spectral_k27_BLP"]] <- Seurat::CreateDimReducObject(
+  embeddings = dc_BLP,
+  key = "DIFBLP_",
+  assay = "bin_5k_h3k27me3"
+)
+
+```
+
+```{r diff_lp_b2, message=F, warning=F}
+DimPlot(seurat_down, reduction = "diffusion_spectral_k27_BLP", group.by = c("Exp", "annot_rna_joint", "annot_k27_joint", "Group"), cols = mypal)
+
+```
+
+## LP-basal pseudotime 
+```{r diff_lp_b3, message=F, warning=F}
+dpt_BLP  <- DPT(dm_BLP)
+```
+
+
+```{r diff_lp_b4, message=F, warning=F}
+#plot(dpt_BLP, col_by = "branch", dcs = c(1, 2))
+tip_idx_branch1 <- which(dpt_BLP@tips[, 1])
+tip_idx_branch1
+
+```
+
+DPT from the tip of branch 1 (LP branch)
+```{r diff_lp_b5, message=F, warning=F}
+plot(dpt_BLP, col_by = 'DPT680') # from basal 1
+plot(dpt_BLP, col_by = 'DPT879') # from LP 
+
+```
+
+
+Add DPT and metadata to the object
+```{r diff_lp_b6, message=F, warning=F}
+dpt_local_from_lp <- dpt_BLP$DPT879
+names(dpt_local_from_lp) <- rownames(destiny::eigenvectors(dm_BLP))
+
+dpt_local_from_basal_ext <- dpt_BLP$DPT146
+names(dpt_local_from_basal) <- rownames(destiny::eigenvectors(dm_BLP))
+
+seurat_down <- Seurat::AddMetaData(
+  seurat_down,
+  metadata = dpt_local_from_lp ,
+  col.name = "DPT_K27_BLP_from_basal"
+)
+
+seurat_down <- Seurat::AddMetaData(
+ seurat_down,
+  metadata = dpt_local_from_lp ,
+  col.name = "DPT_K27_BLP_from_lp"
+)
+
+```
+
+# Reload step 4
+```{r save4, message=F, warning=F, eval=F}
+qsave(seurat_down, file.path(outputDir_objects, "seurat_down_step2.qs"))
+```
+
+```{r load4, message=F, warning=F}
+seurat_down <- qread(file.path(outputDir_objects, "seurat_down_step2.qs"))
+```
+
+# RNA Diffusion map and pseudotime
+## All cells
+```{r rna_diff1, message=F, warning=F}
+X <- Seurat::Embeddings(seurat_rna[["spectral_rna_umi_harmony"]])[, 1:length(colnames(seurat_rna@reductions[["spectral_rna_umi_harmony"]]))]
+dm <- DiffusionMap(X)
+
+dc <- destiny::eigenvectors(dm)
+dc <- as.matrix(dc)
+
+seurat_rna[["diffusion_spectral_rna"]] <- Seurat::CreateDimReducObject(
+  embeddings = dc,
+  key = "DIF_",
+  assay = "RNA_umi"
+)
+```
+
+```{r rna_diff2, message=F, warning=F}
+DimPlot(seurat_rna, reduction = "diffusion_spectral_rna", group.by = c("annot_rna_joint", "Group"), cols = mypal)
+
+```
+
+```{r rna_diff22, message=F, warning=F}
+dpt <- DPT(dm)
+```
+
+```{r rna_diff3, message=F, warning=F}
+#plot(dpt, root = 1, paths_to = c(2, 3), col_by = 'branch')
+tip_idx_branch1 <- which(dpt@tips[, 1])
+
+tip_idx_branch1
+```
+
+```{r rna_diff4, message=F, warning=F}
+plot(dpt, col_by = 'DPT169')
+plot(dpt, col_by = 'DPT508') 
+plot(dpt, col_by = 'DPT610') 
+
+```
+
+Add DPT and metadata to the object
+```{r rna_diff5, message=F, warning=F}
+dpt_global_lp <- dpt$DPT610
+names(dpt_global_lp) <- rownames(destiny::eigenvectors(dm))
+
+dpt_global_hs <- dpt$DPT169
+names(dpt_global_hs) <- rownames(destiny::eigenvectors(dm))
+
+
+seurat_rna <- Seurat::AddMetaData(
+  seurat_rna,
+  metadata = dpt_global_lp,
+  col.name = "DPT_RNA_global_from_lp"
+)
+
+seurat_rna <- Seurat::AddMetaData(
+  seurat_rna,
+  metadata = dpt_global_hs,
+  col.name = "DPT_RNA_global_from_hs"
+)
+
+```
+
+## Only LP and basal
+
+```{r rna_diff6, message=F, warning=F}
+
+s <- seurat_rna
+s@graphs <- list()
+s@neighbors <- list()
+
+s <- subset(
+  s,
+  subset = !(annot_rna_joint %in% c("HS"))
+)
+
+X_BLP <- Seurat::Embeddings(s[["spectral_rna_umi_harmony"]])[, 1:16]
+dm_BLP <- DiffusionMap(X_BLP)
+
+dc_BLP <- destiny::eigenvectors(dm_BLP)
+dc_BLP <- as.matrix(dc_BLP)
+
+seurat_rna[["diffusion_spectral_rna_BLP"]] <- Seurat::CreateDimReducObject(
+  embeddings = dc_BLP,
+  key = "DIFBLP_",
+  assay = "RNA_umi"
+)
+
+```
+
+
+```{r rna_diff7, message=F, warning=F}
+
+DimPlot(seurat_rna, reduction = "diffusion_spectral_rna_BLP", group.by = c("annot_rna_joint", "Group"), cols = mypal)
+DimPlot(seurat_rna, reduction = "diffusion_spectral_rna_BLP", group.by = c("annot_rna_joint", "Group"), cols = mypal, dims = c(1,3))
+
+```
+
+
+```{r rna_diff8, message=F, warning=F}
+dpt_BLP  <- DPT(dm_BLP)
+```
+
+
+```{r rna_diff9, message=F, warning=F}
+#plot(dpt_BLP, root = 1, paths_to = c(2, 3), col_by = 'branch')
+tip_idx_branch1 <- which(dpt_BLP@tips[, 1])
+tip_idx_branch1
+
+```
+
+```{r rna_diff10, message=F, warning=F}
+plot(dpt_BLP, col_by = 'DPT64', dcs = c(1, 3))
+plot(dpt_BLP, col_by = 'DPT1111', dcs = c(1, 3)) 
+```
+
+
+
+Add DPT and metadata to the object
+```{r rna_diff11, message=F, warning=F}
+dpt_local_from_basal <- dpt_BLP$DPT64
+names(dpt_local_from_basal) <- rownames(destiny::eigenvectors(dm_BLP))
+
+dpt_local_from_lp <- dpt_BLP$DPT1111
+names(dpt_local_from_lp) <- rownames(destiny::eigenvectors(dm_BLP))
+
+seurat_rna <- Seurat::AddMetaData(
+  seurat_rna,
+  metadata = dpt_local_from_basal,
+  col.name = "DPT_RNA_BLP_from_basal"
+)
+
+seurat_rna <- Seurat::AddMetaData(
+  seurat_rna,
+  metadata = dpt_local_from_lp,
+  col.name = "DPT_RNA_BLP_from_lp"
+)
+
+```
+
+# Reload step 5
+```{r save5, message=F, warning=F, eval=F}
+qsave(seurat_rna, file.path(outputDir_objects, "seurat_rna_step3.qs"))
+```
+
+```{r reload5, message=F, warning=F, eval=F}
+#| label: load_step4
+
+seurat_rna <- qread(file.path(outputDir_objects, "seurat_rna_step3.qs"))
+seurat <- qread(file.path(outputDir_objects, "seurat_step2.qs"))
+seurat_down <- qread(file.path(outputDir_objects, "seurat_down_step2.qs"))
+meta_marthe <- read.delim(file.path(inputDir, "meta_PT.txt")) # Marthe's metadata
+
+```
+
+# Add diffusion map embeddings
+```{r add_emb, message=F, warning=F, eval=F}
+seurat@reductions[["diffusion_spectral_k4"]] <- seurat_down@reductions[["diffusion_spectral_k4"]]
+seurat@reductions[["diffusion_spectral_k27"]] <- seurat_down@reductions[["diffusion_spectral_k27"]]
+seurat@reductions[["diffusion_spectral_rna"]] <- seurat_down@reductions[["diffusion_spectral_rna"]]
+
+meta_new <- seurat_down@meta.data[colnames(seurat), , drop = FALSE]
+stopifnot(identical(rownames(meta_new), colnames(seurat)))
+seurat@meta.data <- meta_new
+
+seurat_rna <- AddMetaData(seurat_rna, meta_new[, c("annot_k4_joint", "annot_k27_joint")])
+
+```
+
