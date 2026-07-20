@@ -1,0 +1,2304 @@
+---
+title: "5.3_sc_Multiome_Figures"
+author: "Anna Schwager"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r silence, include=FALSE, message=F, warning=F}
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  fig.show = "hold",
+  out.width = "100%"
+)
+```
+
+# R setup
+
+```{r source, message=F, warning=F}
+here::i_am("scripts/5.4_scMultiome_Figures.Rmd")
+mainDir = here::here()
+
+set.seed(123)
+```
+
+```{r libraries_new, message=F, warning=F}
+library(Signac)
+library(Seurat)
+library(tidyverse)
+library(biovizBase)
+library(ggsci)
+library(scales)
+library(pheatmap)
+library(circlize)
+library(grid)
+library(gridExtra)
+library(rlang)
+library(ggpointdensity)
+library(tidytext)
+library(patchwork)
+library(ComplexHeatmap)
+library(destiny)
+library(ggalluvial)
+library(ggrepel)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(qs)
+library(circlize)
+library(GeneNMF)
+library(RColorBrewer)
+library(ggalluvial)
+library(ggforce)
+library(ggpp)
+
+```
+
+# Setting directories and input files
+
+```{r dir, message=F, warning=F}
+mainDir = here::here()
+inputDir =  file.path(mainDir,"input") 
+outputDir = file.path(mainDir, "output")
+annotDir = file.path(mainDir, "annotation")
+
+outputDir_local = file.path(outputDir, "epigenomic_diffusion") ; if(!file.exists(outputDir_local)){dir.create(outputDir_local)}
+outputDir_objects = file.path(outputDir_local, "objects") ; if(!file.exists(outputDir_objects)){dir.create(outputDir_objects)}
+outputDir_plots = file.path(outputDir_local, "plots") ; if(!file.exists(outputDir_plots)){dir.create(outputDir_plots)}
+outputDir_tables = file.path(outputDir_local, "tables") ; if(!file.exists(outputDir_tables)){dir.create(outputDir_tables)}
+
+snap_dir <- file.path(outputDir_objects, "snap_export") ; if(!file.exists(snap_dir )){dir.create(snap_dir)}
+```
+
+# Set colors
+
+```{r col, message=F, warning=F}
+mypal <- c("#4eb7b4","#F9C22EFF","#e4722c", "#c94c9d", "#5c4d7d", "#469D76FF", "#f7dcad", "#3C4B99FF", "#DF9ED4FF", "#C93F55FF", "#E59A52FF", "#EDCE79FF", "pink", "grey", "#92C051FF", "#9F5691FF", "black")
+
+cell_cols <- c(
+  basal   = "#236ec4",
+  luminal = "#ac0000",
+  LP      = "#a3215e",
+  HS      = "#F9C22EFF",
+  Alv     = "#f7dcad"
+)
+
+group_cols <- c(CreP_EARLY = "#c0d69f", 
+                CreP_LATE = "#61980e",
+                CreN = "#5c4d7d",
+                Rosa = "#c94c9d")
+
+```
+
+# Load objects
+
+```{r load, message=F, warning=F}
+seurat <- qread(file.path(outputDir_objects, "seurat_final.qs"))
+seurat_rna <- qread(file.path(outputDir_objects, "seurat_rna_final.qs"))
+
+geneNMF.metaprograms <- qread(file.path(outputDir_objects, "nmf.qs"))
+mp.genes <- geneNMF.metaprograms$metaprograms.genes
+
+```
+
+# QC
+
+```{r qc1, message=F, warning=F}
+seurat$mark[seurat$Group == "Rosa"] <- "h3k4me1"
+df <- seurat@meta.data %>%
+  dplyr::select(
+    Exp,
+    Group,
+    mark,
+    log10_fragments
+  ) %>%
+  dplyr::filter(
+    !is.na(log10_fragments),
+    !is.na(Exp),
+    !is.na(Group),
+    !is.na(mark)
+  )
+
+df$Group <- factor(
+  df$Group,
+  levels = c("CreP_EARLY", "CreP_LATE", "CreN", "Rosa")
+)
+
+exp_order <- df %>%
+  dplyr::distinct(Exp, Group) %>%
+  dplyr::arrange(Group, Exp) %>%
+  dplyr::pull(Exp)
+
+df$Exp <- factor(df$Exp, levels = exp_order)
+
+p_frags <- ggplot(
+  df,
+  aes(
+    x = Exp,
+    y = log10_fragments,
+    fill = Group
+  )
+) +
+  geom_violin(
+    scale = "width",
+    trim = TRUE,
+    color = "black",
+    linewidth = 0.3
+  ) +
+  geom_boxplot(
+    aes(group = Exp),
+    width = 0.15,
+    outlier.shape = NA,
+    fill = "white",
+    color = "black"
+  ) +
+  facet_wrap(
+    ~ mark,
+    scales = "free_x",
+    nrow = 1
+  ) +
+  scale_fill_manual(values = group_cols) +
+  coord_cartesian(ylim = c(0, NA)) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1
+    ),
+    legend.position = "none",
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold")
+  ) +
+  labs(
+    x = NULL,
+    y = "log10 fragments"
+  )
+
+p_frags
+```
+
+```{r qc2, message=F, warning=F}
+df <- seurat_rna@meta.data %>%
+  dplyr::select(Exp, Group, percent.mt, nCount_RNA_umi, nFeature_RNA_umi) 
+
+df$Group <- factor(
+  df$Group,
+  levels = c("CreP_EARLY", "CreP_LATE", "CreN", "Rosa")
+)
+
+exp_order <- df %>%
+  dplyr::distinct(Exp, Group) %>%
+  dplyr::arrange(Group, Exp) %>%
+  dplyr::pull(Exp)
+
+df$Exp <- factor(df$Exp, levels = exp_order)
+
+p_reads <- ggplot(
+  df,
+  aes(x = Exp, y = log10(nCount_RNA_umi), fill = Group)
+) +
+  geom_violin(
+    scale = "width",
+    trim = TRUE,
+    color = "black",
+    linewidth = 0.3
+  ) +
+  geom_boxplot(
+    aes(group = Exp),
+    width = 0.15,
+    outlier.shape = NA,
+    fill = "white",
+    color = "black"
+  ) +
+  scale_fill_manual(values = group_cols) +
+  coord_cartesian(ylim = c(0, NA)) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  ) +
+  labs(
+    x = NULL,
+    y = "log10_RNA_reads"
+  ) + theme_classic() 
+
+p_genes <- ggplot(
+  df,
+  aes(x = Exp, y = nFeature_RNA_umi, fill = Group)
+) +
+  geom_violin(
+    scale = "width",
+    trim = TRUE,
+    color = "black",
+    linewidth = 0.3
+  ) +
+  geom_boxplot(
+    aes(group = Exp),
+    width = 0.15,
+    outlier.shape = NA,
+    fill = "white",
+    color = "black"
+  ) +
+  scale_fill_manual(values = group_cols) +
+  coord_cartesian(ylim = c(0, NA)) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  ) +
+  labs(
+    x = NULL,
+    y = "N features"
+  )
+
+p_mt <- ggplot(
+  df,
+  aes(x = Exp, y = percent.mt, fill = Group)
+) +
+  geom_violin(
+    scale = "width",
+    trim = TRUE,
+    color = "black",
+    linewidth = 0.3
+  ) +
+  geom_boxplot(
+    aes(group = Exp),
+    width = 0.15,
+    outlier.shape = NA,
+    fill = "white",
+    color = "black"
+  ) +
+  scale_fill_manual(values = group_cols) +
+  coord_cartesian(ylim = c(0, 15)) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  ) +
+  labs(
+    x = NULL,
+    y = "% mito reads"
+  )
+
+p_genes | p_mt
+p_reads 
+```
+
+# NMF
+
+## Metaprograms heatmap
+
+```{r nmf_plot, message=F, warning=F}
+program_cols <- c(
+  MP1  = "#4eb7b4",
+  MP2  = "#f7dcad",
+  MP3  = "#faeb65",
+  MP4  = "#afcf74",
+  MP7  = "#d74e7b",
+  MP9  =  "#d6e366", 
+  MP10 =  "#a76a7f",
+  MP12 = "#8c3a56",
+  MP14 = "#390918", 
+  MP15 = "#f9edd6",   
+  MP16 = "#779c37"
+)
+
+ph <- plotMetaPrograms(geneNMF.metaprograms, annotation_colors = program_cols)
+ph
+
+geneNMF.metaprograms$metaprograms.metrics
+```
+
+```{r nmf_save1, message=F, warning=F, eval=F, include=F}
+pdf(
+  file.path(outputDir_plots, "nmf_heatmap_final.pdf"),
+  width = 160 / 25.4,
+  height = 150 / 25.4
+)
+
+ph
+dev.off()
+```
+
+## Gene weights
+
+```{r nmf_weights, message=F, warning=F}
+df_weights <- purrr::imap_dfr(
+  geneNMF.metaprograms$metaprograms.genes.weights,
+  ~ tibble(
+    gene = names(.x),
+    weight = .x,
+    MP = .y
+  )
+)
+
+df_top <- df_weights %>%
+  group_by(MP) %>%
+  slice_max(weight, n = 10) %>%
+  ungroup() %>%
+  mutate(gene_plot = reorder_within(gene, weight, MP))
+
+p_MP <- ggplot(df_top, aes(x = gene_plot, y = weight)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(~MP, scales = "free_y") +
+  scale_x_reordered() +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(),
+    axis.ticks.x = element_line()
+  ) +
+  labs(x = "Gene", y = "Weight")
+write.csv(df_weights, file.path(outputDir_tables, "TableS4_NMF_gene_weights.csv"))
+
+p_MP 
+```
+
+```{r nmf_save2, message=F, warning=F, eval=F, include=F}
+ggsave(file.path(outputDir_plots, "genes_nmf.pdf"),
+       plot = p_MP  ,
+       device = "pdf",
+       units = "mm",
+       width = 220,
+       height = 150)
+```
+
+## Scores per cell group
+
+```{r nmf_vln, message=F, warning=F}
+mp_features <- paste0(
+  "MP",
+  c(1, 2, 3, 4, 7, 9, 10, 12, 14, 15, 16)
+)
+
+cells_keep <- rownames(seurat_rna@meta.data)[
+  complete.cases(
+    seurat_rna@meta.data[
+      , c(mp_features, "annot_rna_joint_alv"),
+      drop = FALSE
+    ]
+  )
+]
+
+seurat_crepos <- subset(
+  seurat_rna,
+  cells = cells_keep
+)
+
+p_types <- VlnPlot(
+  seurat_crepos,
+  features = mp_features,
+  group.by = "annot_rna_joint_alv",
+  cols = cell_cols[c("basal", "LP", "HS", "Alv")],
+  pt.size = 0,
+  ncol = 4
+) &
+  stat_summary(
+    fun = median,
+    geom = "crossbar",
+    width = 0.4,
+    linewidth = 0.4
+  )
+
+p_cre <- VlnPlot(
+  seurat_crepos,
+  features = mp_features,
+  group.by = "Group",
+  pt.size = 0,
+  ncol = 4,
+  cols= group_cols
+) &
+  stat_summary(
+    fun = median,
+    geom = "crossbar",
+    width = 0.4,
+    linewidth = 0.4
+  )
+
+p_types
+p_cre
+```
+
+```{r nmf_save3, message=F, warning=F, eval=F, include=F}
+ggsave(file.path(outputDir_plots, "mps_cell_type.pdf"),
+       plot = p_types  ,
+       device = "pdf",
+       units = "mm",
+       width = 220,
+       height = 150)
+
+ggsave(file.path(outputDir_plots, "mps_cre.pdf"),
+       plot = p_cre  ,
+       device = "pdf",
+       units = "mm",
+       width = 220,
+       height = 150)
+
+```
+
+## Functional enrichment per programm
+
+```{r enrichments, message=F, warning=F}
+top_p_HALLMARKS <- lapply(geneNMF.metaprograms$metaprograms.genes, function(program) {
+  runGSEA(program, universe=rownames(seurat_crepos),
+          category = "H",
+          species = "Mus musculus",
+          pval.thr = 0.05)
+})
+
+
+top_p_C2KEGG <- lapply(geneNMF.metaprograms$metaprograms.genes, function(program) {
+  runGSEA(program, universe=rownames(seurat_crepos),
+          category = "C2",
+          subcategory = "CP:KEGG_LEGACY",
+          species = "Mus musculus",
+          pval.thr = 0.05)
+})
+
+
+top_p_C2WP <- lapply(geneNMF.metaprograms$metaprograms.genes, function(program) {
+  runGSEA(program, universe=rownames(seurat_crepos),
+          category = "C2",
+          subcategory = "CP:WIKIPATHWAYS",
+          species = "Mus musculus",
+          pval.thr = 0.05)
+})
+
+```
+
+```{r enrichments2, message=F, warning=F}
+df_h <- purrr::imap_dfr(top_p_HALLMARKS, function(x, mp) {
+  if (nrow(x) == 0) return(NULL)
+  as.data.frame(x) %>%
+    mutate(MP = mp)
+}) %>%
+  filter(padj < 0.05) %>%
+  mutate(pathway_clean = gsub("^HALLMARK_", "", pathway)) %>%
+  group_by(MP) %>%
+  mutate(pathway_plot = reorder_within(pathway_clean, foldEnrichment, MP)) %>%
+  ungroup()
+
+df_h <- df_h %>% mutate(overlapGenes = sapply(overlapGenes, paste, collapse = ";"))
+#write.csv(df_h, file.path(outputDir_tables, "MP_enrichment_H.csv"))
+
+df_C2WP <- purrr::imap_dfr(top_p_C2WP, function(x, mp) {
+  if (nrow(x) == 0) return(NULL)
+  as.data.frame(x) %>%
+    mutate(MP = mp)
+}) %>%
+  filter(padj < 0.05) %>%
+  group_by(MP) %>%
+  slice_min(padj, n = 10, with_ties = FALSE) %>%   # ← keep top 10
+  mutate(pathway_plot = reorder_within(pathway, foldEnrichment, MP)) %>%
+  ungroup()
+
+df_C2WP <- df_C2WP %>% mutate(overlapGenes = sapply(overlapGenes, paste, collapse = ";"))
+#write.csv(df_C2WP, file.path(outputDir_tables, "MP_enrichment_C2WP.csv"))
+
+df_C2KEGG <- purrr::imap_dfr(top_p_C2KEGG, function(x, mp) {
+  if (nrow(x) == 0) return(NULL)
+  as.data.frame(x) %>%
+    mutate(MP = mp)
+}) %>%
+  filter(padj < 0.05) %>%
+  group_by(MP) %>%
+  slice_min(padj, n = 10, with_ties = FALSE) %>%   # ← keep top 10
+  mutate(pathway_plot = reorder_within(pathway, foldEnrichment, MP)) %>%
+  ungroup()
+
+df_C2KEGG <- df_C2KEGG %>% mutate(overlapGenes = sapply(overlapGenes, paste, collapse = ";"))
+```
+
+```{r enrichments3, message=F, warning=F}
+bind_gsea_list <- function(x, source_name) {
+  purrr::imap_dfr(x, function(res, mp) {
+    if (nrow(res) == 0) return(NULL)
+    as.data.frame(res) %>%
+      mutate(
+        MP = mp,
+        source = source_name
+      )
+  })
+}
+```
+
+```{r enrichments4, message=F, warning=F}
+desired_order <- paste0("MP", 1:16)
+
+df_enrich <- bind_rows(
+  bind_gsea_list(top_p_HALLMARKS, "HALLMARK"),
+  bind_gsea_list(top_p_C2WP, "WIKIPATHWAYS"),
+  bind_gsea_list(top_p_C2KEGG, "KEGG")
+) %>%
+  mutate(
+    padj = as.numeric(padj),
+    score = -log10(padj)
+  ) %>%
+  filter(!is.na(padj), padj < 0.05)
+
+df_top <- df_enrich %>%
+  group_by(MP) %>%
+  slice_min(padj, n = 10, with_ties = FALSE) %>%
+  ungroup()
+
+mat_df <- df_top %>%
+  select(pathway, MP, score) %>%
+  group_by(pathway, MP) %>%
+  summarise(score = max(score), .groups = "drop") %>%
+  pivot_wider(names_from = MP, values_from = score, values_fill = 0)
+
+mat <- mat_df %>%
+  column_to_rownames("pathway") %>%
+  as.matrix()
+
+row_order <- apply(mat, 1, which.max)
+mat <- mat[order(row_order, rownames(mat)), , drop = FALSE]
+
+annotation_col <- data.frame(
+  metaprogram = colnames(mat),
+  row.names = colnames(mat)
+)
+
+ann_colors <- list(
+  metaprogram = program_cols
+)
+
+desired_order <- desired_order[desired_order %in% colnames(mat)]
+mat <- mat[, desired_order]
+annotation_col <- annotation_col[desired_order, , drop = FALSE]
+
+p_all <- pheatmap(
+  mat,
+  cluster_rows =TRUE,
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("white", "darkblue"))(100),
+  annotation_col = annotation_col,
+  annotation_colors = ann_colors,
+  border_color = NA,
+  fontsize_row = 8,
+  fontsize_col = 10,
+  main = "MP pathway enrichment"
+)
+
+p_all
+```
+
+```{r nmf_save4, message=F, warning=F, eval=F, include=F}
+pdf(
+  file.path(outputDir_plots, "nmf_all_enrich_padj.pdf"),
+  width = 170 / 25.4,
+  height = 150 / 25.4
+)
+
+p_all
+dev.off()
+```
+
+## MPs vs pseudotime
+
+```{r corr1, message=F, warning=F}
+filter_outliers <- function(df, x, y, q = 0.99) {
+  xq <- quantile(df[[x]], probs = c(1 - q, q), na.rm = TRUE)
+  yq <- quantile(df[[y]], probs = c(1 - q, q), na.rm = TRUE)
+  
+  df %>%
+    filter(
+      .data[[x]] >= xq[1], .data[[x]] <= xq[2],
+      .data[[y]] >= yq[1], .data[[y]] <= yq[2]
+    )
+}
+```
+
+```{r corr2, message=F, warning=F}
+meta_epi <- seurat@meta.data 
+meta_rna <- seurat_rna@meta.data
+
+plots <- lapply(mp_features, function(mp) {
+  
+  df_plot <- meta_rna %>%
+    dplyr::select(pseudotime, !!rlang::sym(mp)) %>%
+    dplyr::rename(MP = !!rlang::sym(mp)) %>%
+    dplyr::filter(is.finite(pseudotime), is.finite(MP)) %>%
+    filter_outliers("pseudotime", "MP", q = 0.999)
+  
+  lab <- "n < 3"
+  if (nrow(df_plot) >= 3) {
+    cor_res <- suppressWarnings(cor.test(df_plot$pseudotime, df_plot$MP, method = "pearson"))
+    lab <- paste0(
+      "R = ", round(unname(cor_res$estimate), 3),
+      "\np-val = ", format.pval(cor_res$p.value, digits = 3, eps = 1e-300)
+    )
+  }
+  
+  ggplot(df_plot, aes(x = pseudotime, y = MP)) +
+    geom_pointdensity(adjust = 1) +
+    geom_smooth(method = "lm", se = FALSE, color = "black", linewidth = 0.8) +
+    scale_color_viridis_c(option = "magma") +
+    
+    theme_classic() +
+    theme(
+      legend.position = "none",
+      axis.title.x = element_text(size = 9),
+      axis.title.y = element_text(size = 9),
+      axis.text.x  = element_text(size = 8),
+      axis.text.y  = element_text(size = 8)
+    ) +
+    labs(
+      x = "Pseudotime",
+      y = mp,
+      title = paste("Pseudotime vs", mp)
+    ) +
+    annotate(
+      "text_npc",
+      npcx = 0.02, npcy = 0.98,
+      label = lab,
+      hjust = 0, vjust = 1,
+      size = 3.2
+    )
+})
+
+names(plots) <- mp_features
+
+patchwork::wrap_plots(plots, ncol = 4)
+```
+
+```{r nmf_save5, message=F, warning=F, eval=F, include=F}
+pdf(
+  file.path(outputDir_plots, "MPs_vs_pseudotime.pdf"),
+  width = 175 / 25.4,
+  height = 150 / 25.4
+)
+
+patchwork::wrap_plots(plots, ncol = 4)
+dev.off()
+```
+
+# Embeddings
+
+## FACS
+
+```{r facs, message=F, warning=F}
+emb <- Embeddings(seurat_rna, "facs")
+emb_cells <- rownames(emb)
+
+keep <- emb_cells[
+  !is.na(seurat_rna$facs_phenotype[emb_cells]) &
+  is.finite(emb[emb_cells, 1]) &
+  is.finite(emb[emb_cells, 2])
+]
+
+seurat_facs_rna <- subset(seurat_rna, cells = keep)
+
+p_FACS_rna <- SCpubr::do_DimPlot(
+  seurat_facs_rna,
+  reduction = "facs",
+  group.by = "facs_phenotype",
+  colors.use = cell_cols
+) + ggtitle("FACS")
+```
+
+## UMAPs
+
+```{r umap1, message=F, warning=F}
+p_k27 <- SCpubr::do_DimPlot(seurat,
+                        reduction = "UMAP_spectral_k27",
+                        group.by = c("annot_k27_joint"),
+                        colors.use = cell_cols) + ggtitle("H3K27me3")
+
+p_k4 <- SCpubr::do_DimPlot(seurat,
+                        reduction = "UMAP_spectral_k4",
+                        group.by = c("annot_k4_joint"),
+                        colors.use = cell_cols) + ggtitle("H3K4me1")
+
+p_RNA_all <- SCpubr::do_DimPlot(seurat_rna,
+                        reduction = "UMAP_spectral_rna_umi_harmony",
+                        group.by = c("annot_rna_joint_alv"),
+                        colors.use = cell_cols) + ggtitle("RNA")
+
+(p_FACS_rna | p_RNA_all) / (p_k4 | p_k27)
+
+```
+
+```{r umap2, message=F, warning=F}
+cells.use <- colnames(seurat_rna)[which(seurat_rna$Barcode == "GTACTATCGCT")]
+
+p_barcode1 <- SCpubr::do_DimPlot(sample = seurat_rna,
+                                 reduction = "UMAP_spectral_rna_umi_harmony",
+                                 cells.highlight = cells.use,
+                                 sizes.highlight = 1.5,
+                                 colors.use =  "#61980e")
+
+cells.use <- colnames(seurat_rna)[which(seurat_rna$Barcode == "GTAGTCGTAACGATAGTGTAGCTACT")]
+p_barcode2 <- SCpubr::do_DimPlot(sample = seurat_rna,
+                                 reduction = "UMAP_spectral_rna_umi_harmony",
+                                 cells.highlight = cells.use,
+                                 sizes.highlight = 1.5,
+                                 colors.use =  "#61980e")
+
+p_barcode1 | p_barcode2
+
+```
+
+```{r save1, message=F, warning=F, eval=F, include=F}
+ggsave(file.path(outputDir_plots, "umap_k4_new.pdf"),
+       plot = p_k4,
+       device = "pdf",
+       units = "mm",
+       width = 150,
+       height = 180)
+
+ggsave(file.path(outputDir_plots, "umap_k27_new.pdf"),
+       plot = p_k27,
+       device = "pdf",
+       units = "mm",
+       width = 150,
+       height = 180)
+
+ggsave(file.path(outputDir_plots, "umap_rna_all_new.pdf"),
+       plot = p_RNA_all,
+       device = "pdf",
+       units = "mm",
+       width = 150,
+       height = 180)
+
+ggsave(file.path(outputDir_plots, "facs_new.pdf"),
+       plot = p_FACS_rna,
+       device = "pdf",
+       units = "mm",
+       width = 100,
+       height = 120)
+
+ggsave(file.path(outputDir_plots, "umap_barcode1_new.pdf"),
+       plot = p_barcode1,
+       device = "pdf",
+       units = "mm",
+       width = 130,
+       height = 140)
+
+ggsave(file.path(outputDir_plots, "umap_barcode2_new.pdf"),
+       plot = p_barcode2,
+       device = "pdf",
+       units = "mm",
+       width = 130,
+       height = 140)
+
+```
+
+## UMAPs by group
+
+```{r umap3, message=F, warning=F}
+seurat_rna_plot <- subset(
+  seurat_rna,
+  subset = Group != "Rosa"
+)
+
+seurat_plot <- subset(
+  seurat,
+  subset = Group != "Rosa"
+)
+
+seurat_rna_plot@graphs <- list()
+seurat_plot@graphs <- list()
+```
+
+```{r umap4, message=F, warning=F}
+p_rna <- SCpubr::do_DimPlot(sample = seurat_rna_plot,
+                        group.by = "annot_rna_joint_alv",
+                        split.by = "Group",
+                        reduction = "UMAP_spectral_rna_umi_harmony",
+                        colors.use = cell_cols)
+
+DefaultAssay(seurat_plot) <- "bin_5k_h3k4me1"
+p_k4 <- SCpubr::do_DimPlot(
+  sample = subset(seurat_plot, cells = rownames(Embeddings(seurat, "UMAP_spectral_k4"))),
+  group.by = "annot_k4_joint",
+  split.by = "Group",
+  reduction = "UMAP_spectral_k4",
+  colors.use = cell_cols
+)
+
+DefaultAssay(seurat_plot) <- "bin_5k_h3k27me3"
+p_k27 <- SCpubr::do_DimPlot(
+  sample = subset(seurat_plot, cells = rownames(Embeddings(seurat, "UMAP_spectral_k27"))),
+  group.by = "annot_k27_joint",
+  split.by = "Group",
+  reduction = "UMAP_spectral_k27",
+  colors.use = cell_cols
+)
+
+p_rna <- patchwork::wrap_plots(
+  p_rna$patches$plots,
+  nrow = 1
+)
+
+p_k4 <- patchwork::wrap_plots(
+  p_k4$patches$plots,
+  nrow = 1
+)
+
+p_k27 <- patchwork::wrap_plots(
+  p_k27$patches$plots,
+  nrow = 1
+)
+
+p_rna / p_k4 / p_k27
+```
+
+```{r bars, message=F, warning=F}
+celltype_order <- c("basal", "LP", "HS", "Alv")
+group_order <- c("CreN", "CreP_EARLY", "CreP_LATE")
+modality_order <- c("RNA", "H3K4me1", "H3K27me3")
+
+calculate_celltype_proportions <- function(
+    seurat_object,
+    annotation_column,
+    modality
+) {
+
+  df_meta <- seurat_object@meta.data %>%
+    as.data.frame() %>%
+    rownames_to_column("cell") %>%
+    filter(
+      !is.na(Group),
+      !is.na(Exp),
+      !is.na(.data[[annotation_column]]),
+      Group != "Rosa"
+    ) %>%
+    transmute(
+      cell,
+      Group = factor(
+        Group,
+        levels = group_order
+      ),
+      Exp,
+      CellType = factor(
+        .data[[annotation_column]],
+        levels = celltype_order
+      )
+    ) %>%
+    dplyr::filter(
+      !is.na(Group),
+      !is.na(CellType)
+    )
+
+  # Number of cells of each cell type in each experiment
+  df_counts <- df_meta %>%
+    dplyr::count(
+      Group,
+      Exp,
+      CellType,
+      name = "n"
+    )
+
+  # Total number of annotated cells in each experiment
+  df_totals <- df_meta %>%
+    dplyr::count(
+      Group,
+      Exp,
+      name = "total_n"
+    )
+
+  # Cell-type proportions within each experiment
+  df_prop <- df_counts %>%
+    right_join(
+      df_totals,
+      by = c("Group", "Exp")
+    ) %>%
+    complete(
+      nesting(Group, Exp, total_n),
+      CellType = factor(
+        celltype_order,
+        levels = celltype_order
+      ),
+      fill = list(n = 0)
+    ) %>%
+    mutate(
+      prop = n / total_n
+    )
+
+  # Mean and SD across experiments
+  df_mean <- df_prop %>%
+    group_by(
+      Group,
+      CellType
+    ) %>%
+    summarise(
+      mean_prop = mean(prop),
+      sd_prop = sd(prop),
+      n_experiments = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      sd_prop = replace_na(sd_prop, 0),
+      Group = factor(
+        Group,
+        levels = group_order
+      ),
+      CellType = factor(
+        CellType,
+        levels = celltype_order
+      ),
+      Modality = modality
+    ) %>%
+    arrange(
+      Group,
+      CellType
+    ) %>%
+    group_by(
+      Modality,
+      Group
+    ) %>%
+    mutate(
+      # Rescale so that each stacked bar sums exactly to 1
+      stack_total = sum(mean_prop),
+      mean_prop_scaled = mean_prop / stack_total,
+      sd_prop_scaled = sd_prop / stack_total,
+
+      # Upper boundary of each stacked segment
+      ymax_stack = cumsum(mean_prop_scaled),
+
+      # Upward-only SD error bar
+      err_ymin = ymax_stack,
+      err_ymax = ymax_stack + sd_prop_scaled
+    ) %>%
+    ungroup()
+
+  return(df_mean)
+}
+
+df_mean_rna <- calculate_celltype_proportions(
+  seurat_object = seurat_rna,
+  annotation_column = "annot_rna_joint_alv",
+  modality = "RNA"
+)
+
+df_mean_k4 <- calculate_celltype_proportions(
+  seurat_object = seurat,
+  annotation_column = "annot_k4_joint",
+  modality = "H3K4me1"
+)
+
+df_mean_k27 <- calculate_celltype_proportions(
+  seurat_object = seurat,
+  annotation_column = "annot_k27_joint",
+  modality = "H3K27me3"
+)
+
+df_mean_all <- bind_rows(
+  df_mean_rna,
+  df_mean_k4,
+  df_mean_k27
+) %>%
+  mutate(
+    Modality = factor(
+      Modality,
+      levels = modality_order
+    ),
+    Group = factor(
+      Group,
+      levels = group_order
+    ),
+    CellType = factor(
+      CellType,
+      levels = celltype_order
+    )
+  )
+
+df_mean_rna <- calculate_celltype_proportions(
+  seurat_object = seurat_rna,
+  annotation_column = "annot_rna_joint_alv",
+  modality = "RNA"
+)
+
+df_mean_k4 <- calculate_celltype_proportions(
+  seurat_object = seurat,
+  annotation_column = "annot_k4_joint",
+  modality = "H3K4me1"
+)
+
+df_mean_k27 <- calculate_celltype_proportions(
+  seurat_object = seurat,
+  annotation_column = "annot_k27_joint",
+  modality = "H3K27me3"
+)
+```
+
+```{r bars2, message=F, warning=F}
+p_bar_all <- ggplot(
+  df_mean_all,
+  aes(
+    x = Group,
+    y = mean_prop_scaled,
+    fill = CellType
+  )
+) +
+  geom_col(
+    color = "black",
+    linewidth = 0.4,
+    width = 0.7
+  ) +
+  geom_segment(
+    aes(
+      x = as.numeric(Group),
+      xend = as.numeric(Group),
+      y = err_ymin,
+      yend = err_ymax,
+      group = CellType
+    ),
+    linewidth = 0.45
+  ) +
+  geom_segment(
+    aes(
+      x = as.numeric(Group) - 0.09,
+      xend = as.numeric(Group) + 0.09,
+      y = err_ymax,
+      yend = err_ymax,
+      group = CellType
+    ),
+    linewidth = 0.45
+  ) +
+  facet_wrap(
+    ~ Modality,
+    nrow = 1
+  ) +
+  scale_fill_manual(
+    values = cell_cols[celltype_order],
+    breaks = celltype_order,
+    limits = celltype_order,
+    drop = FALSE,
+    na.value = "grey80"
+  ) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    breaks = c(0, 0.25, 0.5, 0.75, 1),
+    limits = c(0, 1.15),
+    expand = expansion(
+      mult = c(0, 0.01)
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Mean proportion + SD",
+    fill = NULL
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    strip.background = element_blank(),
+    strip.text = element_text(
+      face = "bold"
+    ),
+    panel.spacing = grid::unit(
+      1,
+      "lines"
+    ),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1
+    )
+  )
+
+p_bar_all
+```
+
+```{r save_bars, message=F, warning=F, eval=F, include=F}
+ggsave(file.path(outputDir_plots, "cell_types_per_group_bars.pdf"),
+       plot = p_bar_all,
+       device = "pdf",
+       units = "mm",
+       width = 200,
+       height = 80)
+```
+
+## Noodle plots 
+
+```{r noodle, message=F, warning=F}
+barcode_use <- "GTACTATCGCT"
+clone_col <- "#61980e"
+
+cells.use <- colnames(seurat_rna)[seurat_rna$Barcode == barcode_use]
+
+# 1. Extract coordinates
+df_k4 <- seurat@reductions[["UMAP_spectral_k4"]]@cell.embeddings %>% as.data.frame()
+df_rna <- seurat_rna@reductions[["UMAP_spectral_rna_umi_harmony"]]@cell.embeddings %>% as.data.frame()
+df_facs <- seurat_rna@meta.data[, c("FACS_CD24", "FACS_CD49f", "facs_phenotype")] %>% as.data.frame()
+df_clone <- df_rna
+
+# 2. Add modality-specific annotations
+df_k4$cluster <- seurat@meta.data[rownames(df_k4), "annot_k4_joint"]
+df_rna$cluster <- seurat_rna@meta.data[rownames(df_rna), "annot_rna_joint_alv"]
+df_facs$cluster <- seurat_rna@meta.data[rownames(df_facs), "facs_phenotype"]
+df_clone$cluster <- "clone_panel"
+
+# 3. Add modality labels
+df_k4$mark <- "H3K4me1"
+df_rna$mark <- "RNA"
+df_facs$mark <- "FACS"
+df_clone$mark <- "Clone"
+
+# 4. Rename coordinates to common names
+df_k4 <- df_k4 %>% dplyr::rename(x = UMAPspectralk4_1, y = UMAPspectralk4_2)
+df_rna <- df_rna %>% dplyr::rename(x = UMAPspectralrnaumiharmony_1, y = UMAPspectralrnaumiharmony_2)
+df_clone <- df_clone %>% dplyr::rename(x = UMAPspectralrnaumiharmony_1, y = UMAPspectralrnaumiharmony_2)
+df_facs <- df_facs %>% dplyr::rename(x = FACS_CD49f, y = FACS_CD24)
+
+# 5. Keep needed columns and add cell IDs
+df_k4 <- df_k4[, c("x", "y", "cluster", "mark")]
+df_rna <- df_rna[, c("x", "y", "cluster", "mark")]
+df_facs <- df_facs[, c("x", "y", "cluster", "mark")]
+df_clone <- df_clone[, c("x", "y", "cluster", "mark")]
+
+df_k4$cell <- rownames(df_k4)
+df_rna$cell <- rownames(df_rna)
+df_facs$cell <- rownames(df_facs)
+df_clone$cell <- rownames(df_clone)
+
+df_clone$is_clone <- df_clone$cell %in% cells.use
+
+# 6. Transform FACS to log10 scale
+df_facs <- df_facs %>% mutate(x = log10(x + 1), y = log10(y + 1))
+
+# 7. Rescale each modality separately
+df_k4 <- df_k4 %>% mutate(x = rescale(x, to = c(0, 0.8)), y = rescale(y, to = c(0, 1)))
+df_rna <- df_rna %>% mutate(x = rescale(x, to = c(0, 0.8)), y = rescale(y, to = c(0, 1)))
+df_clone <- df_clone %>% mutate(x = rescale(x, to = c(0, 0.8)), y = rescale(y, to = c(0, 1)))
+df_facs <- df_facs %>% mutate(x = rescale(x, to = c(0.2, 0.8)), y = rescale(y, to = c(0.2, 0.8)))
+
+# 8. Place panels
+# Layout:
+#   FACS      RNA
+#   H3K4me1   Barcode
+gap_x <- 1.25
+gap_y <- 1.6
+
+df_facs <- df_facs %>% mutate(x = x, y = y + gap_y)
+df_rna <- df_rna %>% mutate(x = x + gap_x, y = y + gap_y)
+df_k4 <- df_k4 %>% mutate(x = x, y = y)
+df_clone <- df_clone %>% mutate(x = x + gap_x, y = y)
+
+df_facs$x <- df_facs$x - 0.3
+df_k4$x <- df_k4$x 
+
+# 9. Store all panels
+df_rna_all <- df_rna
+df_k4_all <- df_k4
+df_facs_all <- df_facs
+df_clone_all <- df_clone
+
+df_rna_all$cluster <- trimws(as.character(df_rna_all$cluster))
+df_k4_all$cluster <- trimws(as.character(df_k4_all$cluster))
+df_facs_all$cluster <- trimws(as.character(df_facs_all$cluster))
+
+levels_order <- c("basal", "luminal", "LP", "HS", "Alv")
+
+points.long <- bind_rows(df_facs_all, df_rna_all, df_k4_all)
+points.long$cluster <- factor(trimws(as.character(points.long$cluster)), levels = levels_order)
+
+# 10. Build omics-to-omics segments 
+common_cells <- Reduce(intersect, list(df_rna_all$cell, df_k4_all$cell, df_facs_all$cell))
+
+df_rna_common <- df_rna_all[df_rna_all$cell %in% common_cells, ]
+df_k4_common <- df_k4_all[df_k4_all$cell %in% common_cells, ]
+df_facs_common <- df_facs_all[df_facs_all$cell %in% common_cells, ]
+
+seg_rna_k4 <- data.frame(
+  x = df_rna_common$x,
+  y = df_rna_common$y,
+  xend = df_k4_common$x[match(df_rna_common$cell, df_k4_common$cell)],
+  yend = df_k4_common$y[match(df_rna_common$cell, df_k4_common$cell)],
+  cluster = df_rna_common$cluster,
+  cell = df_rna_common$cell,
+  stringsAsFactors = FALSE
+)
+
+seg_rna_facs <- data.frame(
+  x = df_rna_common$x,
+  y = df_rna_common$y,
+  xend = df_facs_common$x[match(df_rna_common$cell, df_facs_common$cell)],
+  yend = df_facs_common$y[match(df_rna_common$cell, df_facs_common$cell)],
+  cluster = df_rna_common$cluster,
+  cell = df_rna_common$cell,
+  stringsAsFactors = FALSE
+)
+
+seg_k4_facs <- data.frame(
+  x = df_k4_common$x,
+  y = df_k4_common$y,
+  xend = df_facs_common$x[match(df_k4_common$cell, df_facs_common$cell)],
+  yend = df_facs_common$y[match(df_k4_common$cell, df_facs_common$cell)],
+  cluster = df_k4_common$cluster,
+  cell = df_k4_common$cell,
+  stringsAsFactors = FALSE
+)
+
+seg_rna_k4$cluster <- factor(trimws(as.character(seg_rna_k4$cluster)), levels = levels_order)
+seg_rna_facs$cluster <- factor(trimws(as.character(seg_rna_facs$cluster)), levels = levels_order)
+seg_k4_facs$cluster <- factor(trimws(as.character(seg_k4_facs$cluster)), levels = levels_order)
+segments.omics <- bind_rows(seg_rna_k4, seg_rna_facs, seg_k4_facs)
+
+# 11. Build clone-specific green links
+make_clone_seg <- function(df_clone, df_other, cells.use) {
+  common <- intersect(intersect(df_clone$cell, df_other$cell), cells.use)
+  d1 <- df_clone[match(common, df_clone$cell), ]
+  d2 <- df_other[match(common, df_other$cell), ]
+  data.frame(x = d1$x, y = d1$y, xend = d2$x, yend = d2$y, cell = common, stringsAsFactors = FALSE)
+}
+
+seg_clone_facs <- make_clone_seg(df_clone_all, df_facs_all, cells.use)
+seg_clone_rna <- make_clone_seg(df_clone_all, df_rna_all, cells.use)
+seg_clone_k4 <- make_clone_seg(df_clone_all, df_k4_all, cells.use)
+segments.clone <- bind_rows(seg_clone_facs, seg_clone_rna, seg_clone_k4)
+
+p_four_panel_omics_links_plus_clone_k4 <- ggplot() +
+  geom_segment(data = seg_rna_k4, aes(x = x, y = y, xend = xend, yend = yend, color = cluster), alpha = 0.05, linewidth = 0.25) +
+  geom_segment(data = seg_rna_facs, aes(x = x, y = y, xend = xend, yend = yend, color = cluster), alpha = 0.05, linewidth = 0.25) +
+  geom_segment(data = seg_k4_facs, aes(x = x, y = y, xend = xend, yend = yend, color = cluster), alpha = 0.05, linewidth = 0.25) +
+  geom_segment(data = segments.clone, aes(x = x, y = y, xend = xend, yend = yend), color = clone_col, alpha = 0.45, linewidth = 0.4) +
+  geom_point(data = df_facs_all, aes(x = x, y = y, color = cluster), size = 0.9) +
+  geom_point(data = df_rna_all, aes(x = x, y = y, color = cluster), size = 0.9) +
+  geom_point(data = df_k4_all, aes(x = x, y = y, color = cluster), size = 0.9) +
+  geom_point(data = df_clone_all, aes(x = x, y = y), color = "grey75", size = 0.9) +
+  geom_point(data = df_clone_all %>% filter(is_clone), aes(x = x, y = y), shape = 21, fill = clone_col, color = "black", stroke = 0.35, size = 1.8) +
+  scale_color_manual(values = cell_cols, na.value = "grey80") +
+  annotate("text", x = 0.38, y = gap_y + 1.08, label = "FACS", size = 5) +
+  annotate("text", x = gap_x + 0.5, y = gap_y + 1.08, label = "RNA", size = 5) +
+  annotate("text", x = 0.62, y = 1.08, label = "H3K4me1", size = 5) +
+  annotate("text", x = gap_x + 0.5, y = 1.08, label = paste0("Barcode: ", barcode_use), size = 4) +
+  coord_cartesian(xlim = c(-0.25, gap_x + 1.1), ylim = c(-0.1, gap_y + 1.15), clip = "off") +
+  theme_classic() +
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), legend.position = "right")
+
+p_four_panel_omics_links_plus_clone_k4
+
+```
+
+```{r noodle2, message=F, warning=F}
+barcode_use <- "GTAGTCGTAACGATAGTGTAGCTACT"
+clone_col <- "#61980e"
+
+cells.use <- colnames(seurat_rna)[seurat_rna$Barcode == barcode_use]
+
+# 1. Extract coordinates
+df_k27 <- seurat@reductions[["UMAP_spectral_k27"]]@cell.embeddings %>% as.data.frame()
+df_rna <- seurat_rna@reductions[["UMAP_spectral_rna_umi_harmony"]]@cell.embeddings %>% as.data.frame()
+df_facs <- seurat_rna@meta.data[, c("FACS_CD24", "FACS_CD49f", "facs_phenotype")] %>% as.data.frame()
+df_clone <- df_rna
+
+# 2. Add modality-specific annotations
+df_k27$cluster <- seurat@meta.data[rownames(df_k27), "annot_k27_joint"]
+df_rna$cluster <- seurat_rna@meta.data[rownames(df_rna), "annot_rna_joint_alv"]
+df_facs$cluster <- seurat_rna@meta.data[rownames(df_facs), "facs_phenotype"]
+df_clone$cluster <- "clone_panel"
+
+# 3. Add modality labels
+df_k27$mark <- "H3K27me3"
+df_rna$mark <- "RNA"
+df_facs$mark <- "FACS"
+df_clone$mark <- "Clone"
+
+# 4. Rename coordinates to common names
+df_k27 <- df_k27 %>% dplyr::rename(x = UMAPspectralk27_1, y = UMAPspectralk27_2)
+df_rna <- df_rna %>% dplyr::rename(x = UMAPspectralrnaumiharmony_1, y = UMAPspectralrnaumiharmony_2)
+df_clone <- df_clone %>% dplyr::rename(x = UMAPspectralrnaumiharmony_1, y = UMAPspectralrnaumiharmony_2)
+df_facs <- df_facs %>% dplyr::rename(x = FACS_CD49f, y = FACS_CD24)
+
+# 5. Keep needed columns and add cell IDs
+df_k27 <- df_k27[, c("x", "y", "cluster", "mark")]
+df_rna <- df_rna[, c("x", "y", "cluster", "mark")]
+df_facs <- df_facs[, c("x", "y", "cluster", "mark")]
+df_clone <- df_clone[, c("x", "y", "cluster", "mark")]
+
+df_k27$cell <- rownames(df_k27)
+df_rna$cell <- rownames(df_rna)
+df_facs$cell <- rownames(df_facs)
+df_clone$cell <- rownames(df_clone)
+
+df_clone$is_clone <- df_clone$cell %in% cells.use
+
+# 6. Transform FACS to log10 scale
+df_facs <- df_facs %>% mutate(x = log10(x + 1), y = log10(y + 1))
+
+# 7. Rescale each modality separately
+df_k27 <- df_k27 %>% mutate(x = rescale(x, to = c(0, 0.8)), y = rescale(y, to = c(0, 1)))
+df_rna <- df_rna %>% mutate(x = rescale(x, to = c(0, 0.8)), y = rescale(y, to = c(0, 1)))
+df_clone <- df_clone %>% mutate(x = rescale(x, to = c(0, 0.8)), y = rescale(y, to = c(0, 1)))
+df_facs <- df_facs %>% mutate(x = rescale(x, to = c(0.2, 0.8)), y = rescale(y, to = c(0.2, 0.8)))
+
+# 8. Place panels
+# Layout:
+#   FACS       RNA
+#   H3K27me3   Barcode
+gap_x <- 1.25
+gap_y <- 1.6
+
+df_facs <- df_facs %>% mutate(x = x, y = y + gap_y)
+df_rna <- df_rna %>% mutate(x = x + gap_x, y = y + gap_y)
+df_k27 <- df_k27 %>% mutate(x = x, y = y)
+df_clone <- df_clone %>% mutate(x = x + gap_x, y = y)
+
+df_facs$x <- df_facs$x - 0.3
+df_k27$x <- df_k27$x
+
+# 9. Store all panels
+df_rna_all <- df_rna
+df_k27_all <- df_k27
+df_facs_all <- df_facs
+df_clone_all <- df_clone
+
+df_rna_all$cluster <- trimws(as.character(df_rna_all$cluster))
+df_k27_all$cluster <- trimws(as.character(df_k27_all$cluster))
+df_facs_all$cluster <- trimws(as.character(df_facs_all$cluster))
+
+levels_order <- c("basal", "luminal", "LP", "HS", "Alv")
+
+points.long <- bind_rows(df_facs_all, df_rna_all, df_k27_all)
+points.long$cluster <- factor(trimws(as.character(points.long$cluster)), levels = levels_order)
+
+# 10. Build omics-to-omics segments
+common_cells <- Reduce(intersect, list(df_rna_all$cell, df_k27_all$cell, df_facs_all$cell))
+
+df_rna_common <- df_rna_all[df_rna_all$cell %in% common_cells, ]
+df_k27_common <- df_k27_all[df_k27_all$cell %in% common_cells, ]
+df_facs_common <- df_facs_all[df_facs_all$cell %in% common_cells, ]
+
+seg_rna_k27 <- data.frame(
+  x = df_rna_common$x,
+  y = df_rna_common$y,
+  xend = df_k27_common$x[match(df_rna_common$cell, df_k27_common$cell)],
+  yend = df_k27_common$y[match(df_rna_common$cell, df_k27_common$cell)],
+  cluster = df_rna_common$cluster,
+  cell = df_rna_common$cell,
+  stringsAsFactors = FALSE
+)
+
+seg_rna_facs <- data.frame(
+  x = df_rna_common$x,
+  y = df_rna_common$y,
+  xend = df_facs_common$x[match(df_rna_common$cell, df_facs_common$cell)],
+  yend = df_facs_common$y[match(df_rna_common$cell, df_facs_common$cell)],
+  cluster = df_rna_common$cluster,
+  cell = df_rna_common$cell,
+  stringsAsFactors = FALSE
+)
+
+seg_k27_facs <- data.frame(
+  x = df_k27_common$x,
+  y = df_k27_common$y,
+  xend = df_facs_common$x[match(df_k27_common$cell, df_facs_common$cell)],
+  yend = df_facs_common$y[match(df_k27_common$cell, df_facs_common$cell)],
+  cluster = df_k27_common$cluster,
+  cell = df_k27_common$cell,
+  stringsAsFactors = FALSE
+)
+
+seg_rna_k27$cluster <- factor(trimws(as.character(seg_rna_k27$cluster)), levels = levels_order)
+seg_rna_facs$cluster <- factor(trimws(as.character(seg_rna_facs$cluster)), levels = levels_order)
+seg_k27_facs$cluster <- factor(trimws(as.character(seg_k27_facs$cluster)), levels = levels_order)
+segments.omics <- bind_rows(seg_rna_k27, seg_rna_facs, seg_k27_facs)
+
+# 11. Build clone-specific green links
+make_clone_seg <- function(df_clone, df_other, cells.use) {
+  common <- intersect(intersect(df_clone$cell, df_other$cell), cells.use)
+  d1 <- df_clone[match(common, df_clone$cell), ]
+  d2 <- df_other[match(common, df_other$cell), ]
+  data.frame(x = d1$x, y = d1$y, xend = d2$x, yend = d2$y, cell = common, stringsAsFactors = FALSE)
+}
+
+seg_clone_facs <- make_clone_seg(df_clone_all, df_facs_all, cells.use)
+seg_clone_rna <- make_clone_seg(df_clone_all, df_rna_all, cells.use)
+seg_clone_k27 <- make_clone_seg(df_clone_all, df_k27_all, cells.use)
+segments.clone <- bind_rows(seg_clone_facs, seg_clone_rna, seg_clone_k27)
+
+p_four_panel_omics_links_plus_clone_k27 <- ggplot() +
+  geom_segment(data = seg_rna_k27, aes(x = x, y = y, xend = xend, yend = yend, color = cluster), alpha = 0.05, linewidth = 0.25) +
+  geom_segment(data = seg_rna_facs, aes(x = x, y = y, xend = xend, yend = yend, color = cluster), alpha = 0.05, linewidth = 0.25) +
+  geom_segment(data = seg_k27_facs, aes(x = x, y = y, xend = xend, yend = yend, color = cluster), alpha = 0.05, linewidth = 0.25) +
+  geom_segment(data = segments.clone, aes(x = x, y = y, xend = xend, yend = yend), color = clone_col, alpha = 0.45, linewidth = 0.4) +
+  geom_point(data = df_facs_all, aes(x = x, y = y, color = cluster), size = 0.9) +
+  geom_point(data = df_rna_all, aes(x = x, y = y, color = cluster), size = 0.9) +
+  geom_point(data = df_k27_all, aes(x = x, y = y, color = cluster), size = 0.9) +
+  geom_point(data = df_clone_all, aes(x = x, y = y), color = "grey75", size = 0.9) +
+  geom_point(data = df_clone_all %>% filter(is_clone), aes(x = x, y = y), shape = 21, fill = clone_col, color = "black", stroke = 0.35, size = 1.8) +
+  scale_color_manual(values = cell_cols, na.value = "grey80") +
+  annotate("text", x = 0.38, y = gap_y + 1.08, label = "FACS", size = 5) +
+  annotate("text", x = gap_x + 0.5, y = gap_y + 1.08, label = "RNA", size = 5) +
+  annotate("text", x = 0.62, y = 1.08, label = "H3K27me3", size = 5) +
+  annotate("text", x = gap_x + 0.5, y = 1.08, label = paste0("Barcode: ", barcode_use), size = 4) +
+  coord_cartesian(xlim = c(-0.25, gap_x + 1.1), ylim = c(-0.1, gap_y + 1.15), clip = "off") +
+  theme_classic() +
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), legend.position = "right")
+
+p_four_panel_omics_links_plus_clone_k27
+
+```
+
+```{r save6, message=F, warning=F, eval=F, include=F}
+ggsave(file.path(outputDir_plots, "square_k4_all_new.pdf"),
+       plot = p_four_panel_omics_links_plus_clone_k4,
+       device = "pdf",
+       units = "mm",
+       width = 220,
+       height = 160)
+
+ggsave(file.path(outputDir_plots, "square_k27_all_new.pdf"),
+       plot = p_four_panel_omics_links_plus_clone_k27,
+       device = "pdf",
+       units = "mm",
+       width = 220,
+       height = 160)
+
+
+ggsave(file.path(outputDir_plots, "square_k4_all_new_segments.pdf"),
+       plot = p_four_panel_segments_only_k4,
+       device = "pdf",
+       units = "mm",
+       width = 220,
+       height = 160)
+
+ggsave(file.path(outputDir_plots, "square_k27_all_new_segments.pdf"),
+       plot = p_four_panel_segments_only_k27,
+       device = "pdf",
+       units = "mm",
+       width = 220,
+       height = 160)
+
+```
+
+# Barcode plots
+
+```{r barcode, message=F, warning=F}
+meta_joint <- meta_rna %>%
+  arrange(Barcode)
+
+barcodes <- unique(meta_joint$Barcode)
+Ncol <- length(barcodes)
+
+mycols_barcode <- colorRampPalette(rev(brewer.pal(11, "Paired")))(Ncol)
+names(mycols_barcode) <- barcodes
+
+```
+
+```{r barcode2, message=F, warning=F}
+df_count <- meta_joint %>%
+  dplyr::select(Barcode, annot_rna_joint_alv) %>%
+  dplyr::filter(
+    !is.na(Barcode),
+    !is.na(annot_rna_joint_alv)
+  ) %>%
+  dplyr::count(Barcode, annot_rna_joint_alv, name = "n")
+
+mat <- df_count %>%
+  tidyr::pivot_wider(
+    names_from = annot_rna_joint_alv,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  as.data.frame()
+
+rownames(mat) <- mat$Barcode
+mat <- as.matrix(mat[, -1, drop = FALSE])
+
+barcodes_plot <- intersect(names(mycols_barcode), rownames(mat))
+
+mat <- mat[barcodes_plot, , drop = FALSE]
+grid_cols <- c(mycols_barcode[barcodes_plot], cell_cols)
+
+```
+
+```{r barcode3, message=F, warning=F}
+#pdf(file.path(outputDir_plots, "barcode_chord_plot_new.pdf"), width = 6, height = 6)
+circos.clear()
+circos.par(gap.degree = c(rep(1, nrow(mat) - 1), 8, rep(6, ncol(mat) - 1), 12))
+
+chordDiagram(
+  x = mat,
+  grid.col = grid_cols,
+  transparency = 0.2,
+  annotationTrack = "grid",
+  preAllocateTracks = 1,
+  directional = 0
+)
+
+circos.trackPlotRegion(
+  track.index = 1,
+  panel.fun = function(x, y) {
+    sector.name <- get.cell.meta.data("sector.index")
+    if (sector.name %in% colnames(mat)) {
+      xlim <- get.cell.meta.data("xlim")
+      ylim <- get.cell.meta.data("ylim")
+      circos.text(
+        x = mean(xlim),
+        y = ylim[1] + 0.1,
+        labels = sector.name,
+        facing = "bending.outside",
+        niceFacing = TRUE,
+        cex = 0.8
+      )
+    }
+  },
+  bg.border = NA
+)
+
+#dev.off()
+```
+
+```{r barcode4, message=F, warning=F}
+multi_fate_barcodes <- df_count %>%
+  dplyr::group_by(Barcode) %>%
+  dplyr::summarise(n_fates = dplyr::n_distinct(annot_rna_joint_alv), .groups = "drop") %>%
+  dplyr::filter(n_fates > 1) %>%
+  dplyr::pull(Barcode)
+
+df_count2 <- df_count %>%
+  dplyr::filter(Barcode %in% multi_fate_barcodes)
+
+barcode_order <- df_count2 %>%
+  dplyr::group_by(Barcode) %>%
+  dplyr::summarise(total_n = sum(n), .groups = "drop") %>%
+  dplyr::arrange(dplyr::desc(total_n)) %>%
+  dplyr::pull(Barcode)
+
+mat <- df_count2 %>%
+  tidyr::pivot_wider(
+    names_from = annot_rna_joint_alv,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  as.data.frame()
+
+rownames(mat) <- mat$Barcode
+mat <- as.matrix(mat[, -1, drop = FALSE])
+mat <- mat[barcode_order, , drop = FALSE]
+mat <- mat[, c("LP", "Alv", "basal"), drop = FALSE]
+
+```
+
+```{r barcode5, message=F, warning=F}
+#pdf(file.path(outputDir_plots, "multi_barcode_chord_plot_new.pdf"), width = 6, height = 6)
+circos.clear()
+circos.par(gap.degree = c(rep(1, nrow(mat) - 1), 8, rep(6, ncol(mat) - 1), 12))
+
+link_colors <- matrix(
+  cell_cols[colnames(mat)],
+  nrow = nrow(mat),
+  ncol = ncol(mat),
+  byrow = TRUE
+)
+
+chordDiagram(
+  x = mat,
+  grid.col = grid_cols,
+  col = link_colors,
+  transparency = 0.2,
+  annotationTrack = "grid",
+  preAllocateTracks = 1,
+  directional = 0
+)
+
+circos.trackPlotRegion(
+  track.index = 1,
+  panel.fun = function(x, y) {
+    sector.name <- get.cell.meta.data("sector.index")
+    if (sector.name %in% colnames(mat)) {
+      xlim <- get.cell.meta.data("xlim")
+      ylim <- get.cell.meta.data("ylim")
+      circos.text(
+        x = mean(xlim),
+        y = ylim[1] + 0.1,
+        labels = sector.name,
+        facing = "bending.outside",
+        niceFacing = TRUE,
+        cex = 0.8
+      )
+    }
+  },
+  bg.border = NA
+)
+
+#dev.off()
+```
+
+# Alluvial plots
+
+```{r alluvial1, message=F, warning=F}
+df_alluvial <- meta_joint %>%
+  dplyr::select(facs_phenotype, annot_rna_joint_alv, annot_k4_joint, annot_k27_joint, Group, Exp) %>%
+  dplyr::filter(
+    !is.na(facs_phenotype),
+    !is.na(annot_rna_joint_alv),
+    !is.na(annot_k27_joint) | !is.na(annot_k4_joint),
+    Group != "Rosa",
+    !Exp %in% c("exp4", "exp5")
+  ) %>%
+  dplyr::mutate(
+    annot_epi = dplyr::coalesce(annot_k4_joint, annot_k27_joint)
+  )
+
+df_plot_late <- df_alluvial %>% 
+    dplyr::filter(
+    Group == "CreP_LATE") %>%
+    dplyr::count(facs_phenotype, annot_rna_joint_alv, annot_epi) %>%
+  dplyr::select(facs_phenotype, annot_rna_joint_alv, annot_epi, n)
+
+df_plot_early <- df_alluvial %>% 
+    dplyr::filter(
+    Group == "CreP_EARLY") %>%
+    dplyr::count(facs_phenotype, annot_rna_joint_alv, annot_epi) %>%
+  dplyr::select(facs_phenotype, annot_rna_joint_alv, annot_epi, n)
+
+df_plot_neg <- df_alluvial %>% 
+    dplyr::filter(
+    Group == "CreN",
+    annot_rna_joint_alv == "LP") %>%
+    dplyr::count(facs_phenotype, annot_rna_joint_alv, annot_epi) %>%
+  dplyr::select(facs_phenotype, annot_rna_joint_alv, annot_epi, n)
+
+```
+
+```{r alluvial2, message=F, warning=F}
+df_par <- ggforce::gather_set_data(df_plot_neg, 1:3)
+df_par$x <- factor(df_par$x, levels = c("facs_phenotype", "annot_rna_joint_alv", "annot_epi"))
+p_all_neg_both <- ggplot(
+  df_par,
+  aes(x = x, id = id, split = y, value = n)
+) +
+  geom_parallel_sets(
+    fill = "grey70",
+    alpha = 0.5,
+    axis.width = 0.15
+  ) +
+  geom_parallel_sets_axes(
+    aes(fill = y),
+    axis.width = 0.15,
+    color = "black"
+  ) +
+  geom_parallel_sets_labels(
+    angle = 0,
+    size = 3
+  ) +
+  scale_fill_manual(values = cell_cols, na.value = "grey80") +
+  scale_x_discrete(labels = c("FACS", "RNA", "K27")) +
+  theme_classic() +
+  theme(
+    legend.position = "none",
+    axis.title = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+df_par <- ggforce::gather_set_data(df_plot_early, 1:3)
+df_par$x <- factor(df_par$x, levels = c("facs_phenotype", "annot_rna_joint_alv", "annot_epi"))
+p_all_early_both <- ggplot(
+  df_par,
+  aes(x = x, id = id, split = y, value = n)
+) +
+  geom_parallel_sets(
+    fill = "grey70",
+    alpha = 0.5,
+    axis.width = 0.15
+  ) +
+  geom_parallel_sets_axes(
+    aes(fill = y),
+    axis.width = 0.15,
+    color = "black"
+  ) +
+  geom_parallel_sets_labels(
+    angle = 0,
+    size = 3
+  ) +
+  scale_fill_manual(values = cell_cols, na.value = "grey80") +
+  scale_x_discrete(labels = c("FACS", "RNA", "K27")) +
+  theme_classic() +
+  theme(
+    legend.position = "none",
+    axis.title = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+df_par <- ggforce::gather_set_data(df_plot_late, 1:3)
+df_par$x <- factor(df_par$x, levels = c("facs_phenotype", "annot_rna_joint_alv", "annot_epi"))
+p_all_late_both <- ggplot(
+  df_par,
+  aes(x = x, id = id, split = y, value = n)
+) +
+  geom_parallel_sets(
+    fill = "grey70",
+    alpha = 0.5,
+    axis.width = 0.15
+  ) +
+  geom_parallel_sets_axes(
+    aes(fill = y),
+    axis.width = 0.15,
+    color = "black"
+  ) +
+  geom_parallel_sets_labels(
+    angle = 0,
+    size = 3
+  ) +
+  scale_fill_manual(values = cell_cols, na.value = "grey80") +
+  scale_x_discrete(labels = c("FACS", "RNA", "K27")) +
+  theme_classic() +
+  theme(
+    legend.position = "none",
+    axis.title = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+p_all_neg_both | p_all_early_both | p_all_late_both
+
+```
+
+```{r save7, message=F, warning=F, eval=F, include=F}
+ggsave(file.path(outputDir_plots, "alluvials_both_new.pdf"),
+       plot = (p_all_neg_both | p_all_early_both | p_all_late_both),
+       device = "pdf",
+       units = "mm",
+       width = 360,
+       height = 100)
+
+```
+
+# Donut plots
+
+```{r donut1, message=F, warning=F}
+df_cells <- meta_joint %>%
+  dplyr::select(facs_phenotype, annot_rna_joint_alv, annot_k4_joint, annot_k27_joint, Group, Exp) %>%
+  dplyr::mutate(
+    annot_epi = dplyr::coalesce(annot_k4_joint, annot_k27_joint)
+  ) %>%
+  dplyr::filter(
+    !is.na(annot_rna_joint_alv),
+    !is.na(annot_epi),
+     Group != "Rosa",
+    !Exp %in% c("exp4", "exp5")
+  ) %>%
+  dplyr::mutate(
+    concordance_facs_rna = dplyr::case_when(
+      facs_phenotype == "basal"   & annot_rna_joint_alv == "basal" ~ "Concordant",
+      facs_phenotype == "luminal" & annot_rna_joint_alv %in% c("LP", "HS", "Alv") ~ "Concordant",
+      TRUE ~ "Discordant"
+    ),
+      concordance_facs_epi = dplyr::case_when(
+      facs_phenotype == "basal"   & annot_epi == "basal" ~ "Concordant",
+      facs_phenotype == "luminal" & annot_epi %in% c("LP", "HS", "Alv") ~ "Concordant",
+      TRUE ~ "Discordant"
+    ),
+    concordance_rna_epi = dplyr::case_when(
+      annot_rna_joint_alv == "basal" & annot_epi == "basal" ~ "Concordant",
+      annot_rna_joint_alv %in% c("LP", "HS", "Alv") & annot_epi %in% c("LP", "HS", "Alv") ~ "Concordant",
+      TRUE ~ "Discordant"
+    ),
+    alternative_fate_rna = dplyr::case_when(
+      annot_rna_joint_alv == "LP" ~ "Not alternative",
+      TRUE ~ "Alternative"
+    ),
+    alternative_fate_epi = dplyr::case_when(
+      annot_epi == "LP" ~ "Not alternative",
+      TRUE ~ "Alternative"
+    )
+  )
+
+df_cells <- df_cells %>%
+  dplyr::mutate(
+    fate_facs_rna = dplyr::case_when(
+      concordance_facs_rna == "Concordant" & annot_rna_joint_alv == "LP" ~ "Concordant LP",
+      concordance_facs_rna == "Concordant" & annot_rna_joint_alv %in% c("basal") ~ "Concordant basal",
+      concordance_facs_rna == "Concordant" & annot_rna_joint_alv %in% c("HS") ~ "Concordant HS",
+      concordance_facs_rna == "Concordant" & annot_rna_joint_alv %in% c("Alv") ~ "Concordant Alv",
+      TRUE ~ "Discordant"
+      ),
+    
+  fate_rna_epi = dplyr::case_when(
+      concordance_rna_epi == "Concordant" & annot_epi == "LP" ~ "Concordant LP",
+      concordance_rna_epi == "Concordant" & annot_epi %in% c("basal") ~ "Concordant basal",
+      concordance_rna_epi == "Concordant" & annot_epi %in% c("HS") ~ "Concordant HS",
+      concordance_rna_epi == "Concordant" & annot_epi %in% c("Alv") ~ "Concordant Alv",
+      TRUE ~ "Discordant"
+  ))
+
+```
+
+```{r donut2, message=F, warning=F}
+df_donut <- bind_rows(
+  df_cells %>%
+    dplyr::filter(!is.na(Group), !is.na(fate_facs_rna)) %>%
+    dplyr::count(Group, status = fate_facs_rna) %>%
+    dplyr::mutate(transition = "FACS → RNA"),
+  
+  df_cells %>%
+    dplyr::filter(!is.na(Group), !is.na(fate_rna_epi)) %>%
+    dplyr::count(Group, status = fate_rna_epi) %>%
+    dplyr::mutate(transition = "RNA → EPI")
+) %>%
+  dplyr::group_by(Group, transition) %>%
+  dplyr::mutate(
+    frac = n / sum(n),
+    ymax = cumsum(frac),
+    ymin = lag(ymax, default = 0),
+    label = paste0(round(frac * 100), "%")
+  ) %>%
+  dplyr::ungroup()
+
+
+df_donut$status <- factor(
+  df_donut$status,
+  levels = c(
+    "Concordant LP",
+    "Concordant Alv",
+    "Concordant HS",
+    "Concordant basal",
+    "Discordant"
+  )
+)
+
+donut_cols <- c(
+  "Concordant LP" = "#a3215e",
+  "Concordant Alv" = "#f7dcad",
+  "Concordant HS" = "#F9C22EFF",
+  "Concordant basal" = "#236ec4",
+  "Discordant" = "grey60"
+)
+
+p_donut_fate <- ggplot(
+  df_donut,
+  aes(ymax = ymax, ymin = ymin, xmax = 2, xmin = 1.2, fill = status)
+) +
+  geom_rect(color = "black", linewidth = 0.4) +
+  geom_text(
+    data = df_donut %>% dplyr::filter(frac > 0.04),
+    aes(
+      x = 1.7,
+      y = (ymin + ymax) / 2,
+      label = label
+    ),
+    size = 3
+  ) +
+  coord_polar(theta = "y") +
+  xlim(c(0.5, 2.5)) +
+  facet_grid(Group ~ transition) +
+  scale_fill_manual(values = donut_cols, drop = FALSE) +
+  theme_void() +
+  theme(
+    strip.text = element_text(size = 11, face = "bold"),
+    legend.position = "bottom"
+  )
+
+p_donut_fate
+```
+
+```{r save_donuts, message=F, warning=F, eval=F, include=F}
+ggsave(file.path(outputDir_plots, "donut_both_new.pdf"),
+       plot = p_donut_both,
+       device = "pdf",
+       units = "mm",
+       width = 300,
+       height = 200)
+
+ggsave(file.path(outputDir_plots, "donut_both_fate_new.pdf"),
+       plot = p_donut_fate,
+       device = "pdf",
+       units = "mm",
+       width = 200,
+       height = 200)
+
+```
+
+# Diffusion maps
+```{r prep, message=F, warning=F}
+seurat@graphs <- list()
+seurat_rna@graphs <- list()
+```
+
+
+## K4
+```{r diff_k4, message=F, warning=F}
+p_all_k4 <- SCpubr::do_DimPlot(seurat,
+                   reduction = "diffusion_spectral_k4",
+                   dims = c(1, 3),
+                   group.by = c("annot_k4_joint"),
+                   colors.use = cell_cols) + ggtitle("All cells, LP-basal transition")
+
+cells.use <- colnames(seurat)[seurat$condition == "CreP_LATE"]
+p_late_k4 <- SCpubr::do_DimPlot(
+  seurat,
+  reduction = "diffusion_spectral_k4",
+  dims = c(1, 3),
+  cells.highlight = cells.use,
+  colors.use = "#61980e"
+) + ggtitle("CREpos late, LP-basal transition")
+
+cells.use <- colnames(seurat)[seurat$condition == "CreP_EARLY"]
+p_early_k4 <- SCpubr::do_DimPlot(
+  seurat,
+  reduction = "diffusion_spectral_k4",
+  dims = c(1, 3),
+  cells.highlight = cells.use,
+  colors.use = "#c0d69f"
+) + ggtitle("CREpos early, LP-basal transition")
+
+cells.use <- colnames(seurat)[seurat$condition == "CreN"]
+p_neg_k4 <- SCpubr::do_DimPlot(
+  subset(seurat, cells = cells.use),
+  reduction = "diffusion_spectral_k4",
+  dims = c(1, 3),
+  group.by = c("annot_k4_joint"),
+  colors.use = cell_cols
+) + ggtitle("CREneg, LP-basal transition")
+
+DefaultAssay(seurat) <- "bin_5k_h3k4me1"
+cells.use <- colnames(seurat)[!is.na(seurat$DPT_K4_BLP_from_lp_ext)]
+
+p_dpt_k4_purple <- SCpubr::do_FeaturePlot(
+  seurat,
+  reduction = "diffusion_spectral_k4",
+  dims = c(1,3),
+  features = "DPT_K4_BLP_from_lp_ext",
+  cells = cells.use,
+  sequential.palette = "Purples"
+)
+
+cells.use <- colnames(seurat)[!is.na(seurat$DPT_K4_BLP_from_lp_ext) & seurat$condition == "CreP_EARLY"]
+p_dpt_k4_purple_early <- SCpubr::do_FeaturePlot(
+  seurat,
+  reduction = "diffusion_spectral_k4",
+  dims = c(1,3),
+  features = "DPT_K4_BLP_from_lp_ext",
+  cells = cells.use,
+  sequential.palette = "Purples"
+)
+
+cells.use <- colnames(seurat)[!is.na(seurat$DPT_K4_BLP_from_lp_ext) & seurat$condition == "CreP_LATE"]
+p_dpt_k4_purple_late <- SCpubr::do_FeaturePlot(
+  seurat,
+  reduction = "diffusion_spectral_k4",
+  dims = c(1,3),
+  features = "DPT_K4_BLP_from_lp_ext",
+  cells = cells.use,
+  sequential.palette = "Purples"
+)
+
+cells.use <- colnames(seurat)[!is.na(seurat$DPT_K4_BLP_from_lp_ext) & seurat$condition == "CreN"]
+p_dpt_k4_purple_neg <- SCpubr::do_FeaturePlot(
+  seurat,
+  reduction = "diffusion_spectral_k4",
+  dims = c(1,3),
+  features = "DPT_K4_BLP_from_lp_ext",
+  cells = cells.use,
+  sequential.palette = "Purples"
+)
+
+p_all_k4 | p_dpt_k4_purple
+p_neg_k4 |  p_dpt_k4_purple_neg
+p_early_k4 |  p_dpt_k4_purple_early
+p_late_k4 | p_dpt_k4_purple_late
+
+```
+
+## K27
+
+```{r diff_k27, message=F, warning=F}
+p_all_k27 <- SCpubr::do_DimPlot(seurat,
+                   reduction = "diffusion_spectral_k27",
+                   dims = c(1, 3),
+                   group.by = c("annot_k27_joint"),
+                   colors.use = cell_cols) + ggtitle("All cells, LP-basal transition")
+
+cells.use <- colnames(seurat)[seurat$condition == "CreP_LATE"]
+p_late_k27 <- SCpubr::do_DimPlot(
+  seurat,
+  reduction = "diffusion_spectral_k27",
+  dims = c(1, 3),
+  cells.highlight = cells.use,
+  colors.use = "#61980e"
+) + ggtitle("CreP late, LP-basal transition")
+
+cells.use <- colnames(seurat)[seurat$condition == "CreP_EARLY"]
+p_early_k27 <- SCpubr::do_DimPlot(
+  seurat,
+  reduction = "diffusion_spectral_k27",
+  dims = c(1, 3),
+  cells.highlight = cells.use,
+  colors.use = "#c0d69f"
+) + ggtitle("CreP early, LP-basal transition")
+
+cells.use <- colnames(seurat)[seurat$condition == "CreN"]
+p_neg_k27 <- SCpubr::do_DimPlot(
+  subset(seurat, cells = cells.use),
+  reduction = "diffusion_spectral_k27",
+  dims = c(1, 3),
+  group.by = c("annot_k27_joint"),
+  colors.use = cell_cols
+) + ggtitle("CreN early, LP-basal transition")
+
+DefaultAssay(seurat) <- "bin_5k_h3k27me3"
+cells.use <- colnames(seurat)[!is.na(seurat$DPT_K27_BLP_from_lp)]
+p_dpt_k27_purple <- SCpubr::do_FeaturePlot(
+  seurat,
+  reduction = "diffusion_spectral_k27",
+  dims = c(1,3),
+  features = "DPT_K27_BLP_from_lp",
+  cells = cells.use,
+  sequential.palette = "Purples"
+)
+
+cells.use <- colnames(seurat)[!is.na(seurat$DPT_K27_BLP_from_lp) & seurat$condition == "CreP_EARLY"]
+p_dpt_k27_purple_early <- SCpubr::do_FeaturePlot(
+  seurat,
+  reduction = "diffusion_spectral_k27",
+  dims = c(1,3),
+  features = "DPT_K27_BLP_from_lp",
+  cells = cells.use,
+  sequential.palette = "Purples"
+)
+
+cells.use <- colnames(seurat)[!is.na(seurat$DPT_K27_BLP_from_lp) & seurat$condition == "CreP_LATE"]
+p_dpt_k27_purple_late <- SCpubr::do_FeaturePlot(
+  seurat,
+  reduction = "diffusion_spectral_k27",
+  dims = c(1,3),
+  features = "DPT_K27_BLP_from_lp",
+  cells = cells.use,
+  sequential.palette = "Purples"
+)
+
+cells.use <- colnames(seurat)[!is.na(seurat$DPT_K27_BLP_from_lp) & seurat$condition == "CreN"]
+p_dpt_k27_purple_neg <- SCpubr::do_FeaturePlot(
+  seurat,
+  reduction = "diffusion_spectral_k27",
+  dims = c(1,3),
+  features = "DPT_K27_BLP_from_lp",
+  cells = cells.use,
+  sequential.palette = "Purples"
+)
+
+p_all_k27 | p_dpt_k27_purple 
+p_neg_k27 |  p_dpt_k27_purple_neg
+p_early_k27 |  p_dpt_k27_purple_early
+p_late_k27 | p_dpt_k27_purple_late
+
+```
+
+## RNA
+
+```{r di_rna, message=F, warning=F}
+p_all_rna <- SCpubr::do_DimPlot(seurat_rna,
+                   reduction = "diffusion_spectral_rna",
+                   group.by = c("annot_rna_joint"),
+                   colors.use = cell_cols) + ggtitle("All cells, LP-basal transition")
+
+cells.use <- colnames(seurat_rna)[seurat_rna$condition == "CreP_LATE"]
+p_late_rna <- SCpubr::do_DimPlot(
+  seurat_rna,
+  reduction = "diffusion_spectral_rna",
+  cells.highlight = cells.use,
+  colors.use = "#61980e"
+) + ggtitle("CreP late, LP-basal transition")
+
+cells.use <- colnames(seurat_rna)[seurat_rna$condition == "CreP_EARLY"]
+p_early_rna <- SCpubr::do_DimPlot(
+  seurat_rna,
+  reduction = "diffusion_spectral_rna",
+  cells.highlight = cells.use,
+  colors.use = "#c0d69f"
+) + ggtitle("CreP early, LP-basal transition")
+
+cells.use <- colnames(seurat_rna)[seurat_rna$condition == "CreN"]
+p_neg_rna <- SCpubr::do_DimPlot(
+  subset(seurat_rna, cells = cells.use),
+  reduction = "diffusion_spectral_rna",
+  group.by = c("annot_rna_joint"),
+  colors.use = cell_cols
+) + ggtitle("CreN, LP-basal transition")
+
+DefaultAssay(seurat_rna) <- "SCT_umi"
+cells.use <- colnames(seurat_rna)[!is.na(seurat_rna$DPT_RNA_BLP_from_lp)]
+p_dpt_rna_purple <- SCpubr::do_FeaturePlot(
+  seurat_rna,
+  reduction = "diffusion_spectral_rna",
+  features = "DPT_RNA_BLP_from_lp",
+  cells = cells.use,
+  sequential.palette = "Purples"
+)
+
+cells.use <- colnames(seurat_rna)[!is.na(seurat_rna$DPT_RNA_BLP_from_lp) & seurat_rna$condition == "CreP_EARLY"]
+p_dpt_rna_purple_early <- SCpubr::do_FeaturePlot(
+  seurat_rna,
+  reduction = "diffusion_spectral_rna",
+  features = "DPT_RNA_BLP_from_lp",
+  cells = cells.use,
+  sequential.palette = "Purples"
+)
+
+cells.use <- colnames(seurat_rna)[!is.na(seurat_rna$DPT_RNA_BLP_from_lp) & seurat_rna$condition == "CreP_LATE"]
+p_dpt_rna_purple_late <- SCpubr::do_FeaturePlot(
+  seurat_rna,
+  reduction = "diffusion_spectral_rna",
+  features = "DPT_RNA_BLP_from_lp",
+  cells = cells.use,
+  sequential.palette = "Purples"
+)
+
+cells.use <- colnames(seurat_rna)[!is.na(seurat_rna$DPT_RNA_BLP_from_lp) & seurat_rna$condition == "CreN"]
+p_dpt_rna_purple_neg <- SCpubr::do_FeaturePlot(
+  seurat_rna,
+  reduction = "diffusion_spectral_rna",
+  features = "DPT_RNA_BLP_from_lp",
+  cells = cells.use,
+  sequential.palette = "Purples"
+)
+
+p_all_rna | p_dpt_rna_purple 
+p_neg_rna |  p_dpt_rna_purple_neg
+p_early_rna | p_dpt_rna_purple_early
+p_late_rna |  p_dpt_rna_purple_late
+
+```
+
+# Ridge plots LP-basal transition
+
+```{r ridge1, message=F, warning=F}
+seurat$condition_ridge2 <- dplyr::case_when(
+  seurat$annot_k4_joint == "basal" & seurat$Group %in% c("CreN", "Rosa") ~ "CreN_basal_k4",
+  seurat$annot_k4_joint == "LP"    & seurat$Group %in% c("CreN", "Rosa") ~ "CreN_lp_k4",
+  seurat$annot_k4_joint == "HS"    & seurat$Group %in% c("CreN", "Rosa") ~ "CreN_hs_k4",
+  seurat$annot_k27_joint == "basal" & seurat$Group %in% c("CreN", "Rosa") ~ "CreN_basal_k27",
+  seurat$annot_k27_joint == "LP"    & seurat$Group %in% c("CreN", "Rosa") ~ "CreN_lp_k27",
+  seurat$annot_k27_joint == "HS"    & seurat$Group %in% c("CreN", "Rosa") ~ "CreN_hs_k27",
+  
+  seurat$annot_k4_joint == "basal" & seurat$Group %in% c("CreP_EARLY", "CreP_LATE") ~ "CreP_basal_k4",
+  seurat$annot_k4_joint == "LP"    & seurat$Group %in% c("CreP_EARLY", "CreP_LATE") ~ "CreP_lp_k4",
+  seurat$annot_k4_joint == "HS"    & seurat$Group %in% c("CreP_EARLY", "CreP_LATE") ~ "CreP_hs_k4",
+  seurat$annot_k27_joint == "basal" & seurat$Group %in% c("CreP_EARLY", "CreP_LATE") ~ "CreP_basal_k27",
+  seurat$annot_k27_joint == "LP"    & seurat$Group %in% c("CreP_EARLY", "CreP_LATE") ~ "CreP_lp_k27",
+  seurat$annot_k27_joint == "HS"    & seurat$Group %in% c("CreP_EARLY", "CreP_LATE") ~ "CreP_hs_k27",
+  TRUE ~ NA_character_
+)
+
+seurat_rna$condition_ridge2 <- dplyr::case_when(
+  seurat_rna$annot_rna_joint == "basal" &
+    seurat_rna$Group %in% c("CreN", "Rosa") ~ "CreN_basal_rna",
+
+  seurat_rna$annot_rna_joint == "LP" &
+    seurat_rna$Group %in% c("CreN", "Rosa") ~ "CreN_lp_rna",
+
+  seurat_rna$annot_rna_joint == "HS" &
+    seurat_rna$Group %in% c("CreN", "Rosa") ~ "CreN_hs_rna",
+
+  seurat_rna$annot_rna_joint == "basal" &
+    seurat_rna$Group %in% c("CreP_EARLY", "CreP_LATE") ~ "CreP_basal_rna",
+
+  seurat_rna$annot_rna_joint == "LP" &
+    seurat_rna$Group %in% c("CreP_EARLY", "CreP_LATE") ~ "CreP_lp_rna",
+
+  seurat_rna$annot_rna_joint == "HS" &
+    seurat_rna$Group %in% c("CreP_EARLY", "CreP_LATE") ~ "CreP_hs_rna",
+
+  TRUE ~ NA_character_
+)
+
+seurat_rna$condition_ridge2 <- dplyr::case_when(
+  seurat_rna$annot_rna_joint == "basal" &
+  seurat_rna$Group %in% c("CreN", "Rosa") ~ "CreN_basal_rna",
+  seurat_rna$annot_rna_joint == "LP" &
+  seurat_rna$Group %in% c("CreN", "Rosa") ~ "CreN_lp_rna",
+  seurat_rna$annot_rna_joint == "HS" &
+  seurat_rna$Group %in% c("CreN", "Rosa") ~ "CreN_hs_rna",
+  seurat_rna$annot_rna_joint == "basal" &
+  seurat_rna$Group %in% c("CreP_EARLY", "CreP_LATE") ~ "CreP_basal_rna",
+  seurat_rna$annot_rna_joint == "LP" &
+  seurat_rna$Group %in% c("CreP_EARLY", "CreP_LATE") ~ "CreP_lp_rna",
+  seurat_rna$annot_rna_joint == "HS" &
+  seurat_rna$Group %in% c("CreP_EARLY", "CreP_LATE") ~ "CreP_hs_rna",
+  TRUE ~ NA_character_
+)
+
+condition_order2 <- c(
+  "CreP_hs_rna",
+  "CreN_hs_rna",
+  "CreP_basal_rna",
+  "CreN_basal_rna",
+  "CreP_lp_rna",
+  "CreN_lp_rna"
+)
+
+seurat_rna$condition_ridge2 <- factor(
+  seurat_rna$condition_ridge2,
+  levels = condition_order2
+)
+
+condition_cols2 <- c(CreN_basal_k4 = "#236ec4",
+                     CreN_lp_k4 = "#a3215e",
+                     CreN_hs_k4 = "#F9C22EFF",
+                     CreN_basal_k27 = "#236ec4",
+                     CreN_lp_k27 = "#a3215e",
+                     CreN_hs_k27 = "#F9C22EFF",
+                     CreP_basal_k4 = "#61980e",
+                     CreP_lp_k4 = "#61980e",
+                     CreP_hs_k4 = "#61980e",
+                     CreP_basal_k27 = "#61980e",
+                     CreP_lp_k27 = "#61980e",
+                     CreP_hs_k27 = "#61980e",
+                     CreN_basal_rna = "#236ec4",
+                     CreN_lp_rna = "#a3215e",
+                     CreN_hs_rna = "#F9C22EFF",
+                     CreP_basal_rna = "#61980e",
+                     CreP_lp_rna = "#61980e",
+                     CreP_hs_rna = "#61980e",
+                     CreP_basal_rna = "#61980e"
+                     ) 
+```
+
+```{r ridge2, message=F, warning=F}
+cells_use <- WhichCells(seurat, expression = !is.na(DPT_K4_BLP_from_lp_ext))
+DefaultAssay(seurat) <- "bin_5k_h3k4me1"
+p_ridge_k4_2 <- RidgePlot(subset(seurat, cells = cells_use), features = c("DPT_K4_BLP_from_lp_ext"), group.by = "condition_ridge2", cols = condition_cols2, sort = FALSE)
+p_ridge_k4_2
+
+cells_use <- WhichCells(seurat, expression = !is.na(DPT_K27_BLP_from_lp))
+DefaultAssay(seurat) <- "bin_5k_h3k27me3"
+p_ridge_k27_2 <- RidgePlot(subset(seurat, cells = cells_use), features = c("DPT_K27_BLP_from_lp"), group.by = "condition_ridge2", cols = condition_cols2, sort = FALSE)
+
+p_ridge_k27_2
+
+df_plot <- FetchData(
+  seurat_rna,
+  vars = c(
+    "condition_ridge2",
+    "DPT_RNA_BLP_from_lp"
+  )
+) %>%
+  filter(
+    !is.na(condition_ridge2),
+    !is.na(DPT_RNA_BLP_from_lp)
+  ) %>%
+  mutate(
+    condition_ridge2 = factor(
+      condition_ridge2,
+      levels = condition_order2
+    )
+  )
+
+cells_use <- rownames(df_plot)
+obj_tmp <- subset(
+  seurat_rna,
+  cells = cells_use
+)
+
+obj_tmp$condition_ridge2 <- factor(
+  obj_tmp$condition_ridge2,
+  levels = condition_order2
+)
+
+p_ridge_rna2 <- RidgePlot(
+  object = obj_tmp,
+  features = "DPT_RNA_BLP_from_lp",
+  group.by = "condition_ridge2",
+  cols = condition_cols2[condition_order2],
+  sort = FALSE
+)
+
+p_ridge_rna2
+```
