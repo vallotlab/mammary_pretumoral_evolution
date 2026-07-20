@@ -1,7 +1,7 @@
 # mammary_pretumoral_evolution
 This folder contains the code to reproduce the analysis from *Laisné, Schwartz 2026* paper. 
 
-TO DO 
+The necessary input files are deposited to *XXX*. 
 
 ## Scripts
 ```
@@ -23,3 +23,4 @@ TO DO
 ├── 5.3_scMultiome_NMF.rmd
 └── 5.4_scMultiome_Figures.Rmd
 ```
+
