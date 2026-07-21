@@ -7,7 +7,12 @@ The necessary input files are deposited to *XXX*.
 Input and annotation data required to run the scripts are deposited to Zenodo (**DOI: XXX**). 
 \
 
-## Scripts
+## 1. Script description 
+The **scripts** folder contains the following files, correpsonding to a separate analysis block.
+\
+To reproduce the full analysis, the scripts should be run in designated order to genereate the necessary intermediate files.
+\
+To reproduce the final figures, only the _Figures scripts can be run, starting from the final data object loaded to Zenodo (**DOI: XXX**). 
 ```
 .
 ├── 0_Utils.R
