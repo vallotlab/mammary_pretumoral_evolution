@@ -3,6 +3,10 @@ This folder contains the code to reproduce the analysis from *Laisné, Schwartz 
 
 The necessary input files are deposited to *XXX*. 
 
+## 0. Data availability
+Input and annotation data required to run the scripts are deposited to Zenodo (**DOI: XXX**). 
+\
+
 ## Scripts
 ```
 .
