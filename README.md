@@ -43,6 +43,6 @@ Python dependencies and software versions are listed in *snap_py310_env.yml*.
 Before running the scripts, the Python evironment *snap_py310_env.yml* should be created and all packages should be installed.
 The installation time should not exceed 60 min.
 
-## 4. Runtime
+## 3. Runtime
 On a standard laptop, the runtime for all of the scripts does not exceed 30 min (MacBook Pro M4, 128Gb RAM) or **Marthe's laptop**
 
