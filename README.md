@@ -28,10 +28,11 @@ The **scripts** folder contains the following files, each correpsonding to a sep
 ├── 5.3_scMultiome_NMF.rmd
 └── 5.4_scMultiome_Figures.Rmd
 ```
-To reproduce the full analysis, the scripts should be run in designated order to genereate the necessary intermediate files.
+Expected output of each script can be found in the **notebooks** folder.
 \
+\
+To reproduce the full analysis, the scripts should be run in designated order to genereate the necessary intermediate files.
 To reproduce the final figures, only the **_Figures** scripts can be run, starting from the final data object loaded to Zenodo (**DOI: XXX**). 
-
 
 ## 2. Dependencies
 The code was run in Rstudio, using R (4.5.1) **Marthe's R studio version** and Python (v3.10.19).
