@@ -5,7 +5,7 @@ This folder contains the code to reproduce the analysis from *Laisné, Schwartz 
 Input and annotation data required to run the scripts are deposited to Zenodo (**DOI: XXX**). 
 
 ## 1. Script description 
-The **scripts** folder contains the following files, correpsonding to a separate analysis block:
+The **scripts** folder contains the following files, each correpsonding to a separate analysis block:
 
 ```
 .
