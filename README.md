@@ -22,7 +22,6 @@ The necessary input files are deposited to *XXX*.
 ├── 4_sc_Comparison_MutantWT.Rmd
 ├── 5.1_scMultiome_PreProcess_Annotation.Rmd
 ├── 5.2_scMultiome_DiffusionPseudotime.Rmd
-├── 5.2_sc_Multiome_Figures.Rmd
 ├── 5.3_scMultiome_NMF.rmd
 └── 5.4_scMultiome_Figures.Rmd
 ```
