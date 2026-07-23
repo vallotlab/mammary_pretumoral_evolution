@@ -1,0 +1,209 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(data.table)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+
+library(Seurat)
+library(patchwork)
+library(DoubletFinder)
+
+library(ggplot2)
+library(gridExtra)
+library(ggExtra)
+library(viridis)
+library(Matrix)
+library("ggsci")
+library(cowplot)
+library(platetools)
+library(scales)
+library("gridExtra")
+library(ggpubr)
+library(RColorBrewer)
+library(tidyr)
+library(dplyr)
+library(ggforce)
+
+library(vegan) #PERMANOVA
+
+# Def Paths
+Input_Dir <- "C:/Users/Marthe Laisne/Desktop/FlashSeq_MultiOneCell/Data/MiniBulk_FullTranscriptome/N320/"
+Output_Dir <- "C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/MiniBulkRNA/"
+```
+
+# Tumor vs. Juxta analysis
+```{r}
+rna_seurat_umi <- qs::qread(file= "C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/MiniBulkRNA/rna_seurat_umi.qs")
+```
+
+*Comparison of pre-tumoral juxta samples and tumor samples:*
+Twenty-four mini-Bulk RNA-seq librairies were generated from pools of 100 cells isolated from four tumors and processed in the same sequencing run as juxta-tumoral samples to control for potential contamination of pre-tumoral juxta samples by tumor cells. These libraries were subjected to the same quality-control procedures as described above. For this analysis, only tumor and juxta-tumoral or contralateral samples were retained. Libraries containing exactly 100 cells and fewer than 40,000 detected UMIs were included in downstream analyses.
+
+
+
+
+```{r}
+#Groups definition:
+  # -Jx: juxta-tumoral samples, without tumor cells
+  # -Tm: Tumor cells
+  # -Gl: Young tumor-free mice or contralateral sample (tumor-free gland)
+
+rna_seurat_umi@meta.data <- rna_seurat_umi@meta.data %>%
+  mutate(Juxta_Not = case_when(
+    Plate_Source %in% c("LatePlq1", "LatePlq2") &   CellType != "Tum" &  BioSample !=  c("9341_G4") ~ "Jx",
+    CellType == "Tum" ~ "Tm",
+    TRUE ~ "Gl"))
+
+#Unique biological ID (Mouse + Gland)
+rna_seurat_umi@meta.data$BioSample <- paste0(rna_seurat_umi@meta.data$Mouse, "_",rna_seurat_umi@meta.data$Gland)
+
+#Subset: Tumors and juxta-tumor only, pools of 100 cells exclusively, remove outliers based on RNA count
+rna_seurat_umi_TmJx <- subset(rna_seurat_umi, 
+                  Juxta_Not %in% c("Tm", "Jx") & 
+                    CellType %in% c("MixedGFPpos", "Tum")& 
+                    nCount_RNA < 40000 & 
+                    CellNumber ==100)
+
+```
+
+
+##Ext 4e. MiniBulk
+
+For mini-bulk analyses, count matrices were normalized using Seurat, highly variable genes were identified, and data were scaled prior to principal component analysis (PCA). Sample relationships were visualized using the first principal components. Differences between tumor and juxta-tumoral samples were assessed by PERMANOVA (vegan::adonis2 function) using Euclidean distances computed from PCA coordinates.
+
+
+```{r}
+#Normalization and dimensional reduction: 
+
+rna_seurat_umi_TmJx <- NormalizeData(rna_seurat_umi_TmJx)
+rna_seurat_umi_TmJx <- FindVariableFeatures(rna_seurat_umi_TmJx)
+rna_seurat_umi_TmJx <- ScaleData(rna_seurat_umi_TmJx)
+rna_seurat_umi_TmJx <- RunPCA(rna_seurat_umi_TmJx, 
+                            features = VariableFeatures(rna_seurat_umi_TmJx), 
+                            npcs = 50)
+```
+
+
+```{r}
+# PCA coordinates extraction
+pca_df_tum <- Embeddings(rna_seurat_umi_TmJx, "pca")[, 1:4] %>% as.data.frame()
+
+
+#Adding metadata
+pca_df_tum$BioSample <- rna_seurat_umi_TmJx@meta.data$BioSample
+pca_df_tum$Type <- rna_seurat_umi_TmJx@meta.data$Stage
+pca_df_tum$Age <- rna_seurat_umi_TmJx@meta.data$Age
+pca_df_tum$Ncell <- rna_seurat_umi_TmJx@meta.data$CellNumber
+pca_df_tum$plate <- rna_seurat_umi_TmJx@meta.data$Plate_Source
+pca_df_tum$CellType <- rna_seurat_umi_TmJx@meta.data$CellType
+pca_df_tum$Nreads <- rna_seurat_umi_TmJx@meta.data$nCount_RNA
+
+pca_df_tum$Mouse <- rna_seurat_umi_TmJx@meta.data$Mouse %>% as.character()
+
+pca_df_tum$Nclone <- rna_seurat_umi_TmJx@meta.data$n_barcode
+pca_df_tum$MaxCloneFraction <- rna_seurat_umi_TmJx@meta.data$max_barcode_fraction
+pca_df_tum$BCM_major <- rna_seurat_umi_TmJx@meta.data$BCM_major
+pca_df_tum$Juxta_Not <- rna_seurat_umi_TmJx@meta.data$Juxta_Not
+
+
+#Vizualization:
+
+ggplot(pca_df_tum, aes(x = PC_1, y = PC_2,
+                       shape = Juxta_Not)) +
+  geom_point(size = 4,  alpha = 0.5, aes( color = Mouse),
+             position = position_jitter(width = 0.5, heigh=0.5)) +
+  stat_ellipse(type = "t", level = 0.95) +
+  theme_classic() +
+  scale_shape_manual(values = c(16, 15, 18))+
+  scale_y_continuous(limits = c(-10, 12))+
+
+  labs(title = "PCA of bulk 100-cell samples, Group",
+       x = "PC1", y = "PC2") 
+```
+
+Statistical test of group separation: PERMANOVA made ion euclidean distances computed on PCA coordinates
+```{r}
+library(vegan)
+
+dist_mat <- dist(pca_df_tum[, c("PC_1", "PC_2")])
+
+adonis2(dist_mat ~ Juxta_Not, data = pca_df_tum)
+```
+
+
+##Ext. 4f Pseudobulk by sample
+
+For pseudobulk analyses, raw counts from all mini-bulk libraries originating from the same biological sample (mouse and mammary gland) were summed gene-wise. Resulting pseudobulk profiles were processed using the same normalization and PCA workflow as described above. Group separation between tumor and juxta-tumoral samples was similarly evaluated by PERMANOVA.
+
+
+```{r}
+mat <- GetAssayData(rna_seurat_umi_TmJx, slot = "counts")  # extraction of raw matrice
+meta <- rna_seurat_umi_TmJx@meta.data
+
+groups <- meta$BioSample
+names(groups) <- colnames(mat)
+
+# pseudobulk (sum) by biological sample
+pb_mat <- sapply(unique(groups), function(g) {
+  rowSums(mat[, groups == g, drop = FALSE])
+})
+
+# Create metadata associated with pseudobulks
+meta_pb <- meta %>%
+  group_by(BioSample) %>%
+  summarise(
+    BioSample = first(BioSample),
+    Juxta_Not = first(Juxta_Not),
+    Mouse = first(Mouse)
+  ) %>%
+  as.data.frame()
+
+rownames(meta_pb) <- meta_pb$BioSample
+meta_pb$BioSample <- NULL
+
+
+# Normalization & dimensional reduction: 
+pb_seurat <- CreateSeuratObject(pb_mat)
+pb_seurat@meta.data <- meta_pb[colnames(pb_seurat), , drop = FALSE]
+pb_seurat <- NormalizeData(pb_seurat)
+pb_seurat <- FindVariableFeatures(pb_seurat)
+pb_seurat <- ScaleData(pb_seurat)
+pb_seurat <- RunPCA(pb_seurat, 
+                            features = VariableFeatures(pb_seurat), npcs = 10)
+```
+
+
+
+```{r}
+pca_df_tum <- Embeddings(pb_seurat, "pca")[, 1:4] %>% as.data.frame()
+
+pca_df_tum$BioSample <- pb_seurat@meta.data$BioSample
+pca_df_tum$Mouse <- pb_seurat@meta.data$Mouse %>% as.character()
+pca_df_tum$Juxta_Not <- pb_seurat@meta.data$Juxta_Not
+
+ggplot(pca_df_tum, aes(x = PC_1, y = PC_2,
+                       shape = Juxta_Not)) +
+  geom_point(size = 4,  alpha = 0.5, aes( color = Mouse),
+             position = position_jitter(width = 0.5, heigh=0.5)) +
+  stat_ellipse(type = "t", level = 0.95) +
+  theme_classic() +
+  scale_shape_manual(values = c(16, 15, 18))+
+  #scale_y_continuous(limits = c(-10, 12))+
+
+  labs(title = "PCA of bulk 100-cell samples, Group",
+       x = "PC1", y = "PC2") 
+```
+
+
+```{r}
+#PERMANOVA on pseudobulk
+dist_mat <- dist(pca_df_tum[, c("PC_1", "PC_2")])
+
+adonis2(dist_mat ~ Juxta_Not, data = pca_df_tum)
+```

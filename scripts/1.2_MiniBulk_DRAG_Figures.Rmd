@@ -1,0 +1,752 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+#Intro
+
+```{r}
+library(CellBarcode)
+
+
+library(data.table)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+
+library(Seurat)
+library(patchwork)
+library(DoubletFinder)
+
+library(ggplot2)
+library(gridExtra)
+library(ggExtra)
+library(viridis)
+library(Matrix)
+library(ggsci)
+library(cowplot)
+library(platetools)
+library(scales)
+library(gridExtra)
+library(qs)
+library(RColorBrewer)
+library(ggridges)
+library(rstatix)
+library(ComplexHeatmap)
+library(circlize)
+
+
+library(stringdist)
+library(Biostrings)
+library(msa)
+library(seqinr)
+library(ggmsa)
+
+# -------------------------------------------------------------- 
+# Color definition 
+# --------------------------------------------------------------
+
+cols_fate <- c("basal"  = "#236ec4", 
+               "LP"     = "#a01858",      
+               "HS"     = "#f9c40c",  
+               "Alv"    = "#F7DCAD")
+
+
+cols_Group <- c("EARLY" = "#C0D69F", 
+                "EARLY_2m" = "#C0D69F", 
+                "EARLY_3m" = "#C0D69F", 
+                "LATE"  = "#61980E",
+                "Tm"    = "#841811")
+
+cols_MonoGland <- c("8415_G2-3" = "#375708",  
+                    "8718_D2-3"     = "#61980E",
+                    "8964_G4"       = "#C0D69F")
+```
+
+```{r}
+# ============================================================
+# Define sample ordering for visualization
+# ============================================================
+
+x_order <- c(
+  "9891-G4Gl_Early","9891-D4Gl_Early","9892-G4Gl_Early","9892-D4Gl_Early",
+  "9873-G4Gl_Early","9873-D4Gl_Early","9873-G3Gl_Early","9873-D3Gl_Early",
+  "9826-G4Gl_Early","9826-D4Gl_Early","9784-G4Gl_Early","9784-D4Gl_Early",
+  "9757-G4Gl_Early","9757-D4Gl_Early","9757-G3Gl_Early","9757-D3Gl_Early",
+  "9660-G4Gl_Early","9660-D4Gl_Early","9601-G4Gl_Early","9601-D4Gl_Early",
+  "9568-G4Gl_Early","9568-D2Gl_Early",
+  "9052Jx","9052Tm","8943Jx","8943Tm",
+  "9341Gl_Late","8988Jx","8988Tm",
+  "9424Jx","8962Jx","8962Tm","9423Jx","8903Jx"
+)
+
+x_order_ <- c(
+  "9891-G4_Gl_Early","9891-D4_Gl_Early","9892-G4_Gl_Early","9892-D4_Gl_Early",
+  "9660-G4_Gl_Early","9660-D4_Gl_Early",
+  "9873-G4_Gl_Early","9873-D4_Gl_Early","9873-G3_Gl_Early","9873-D3_Gl_Early",
+  "9601-G4_Gl_Early","9601-D4_Gl_Early",
+  "9826-G4_Gl_Early","9826-D4_Gl_Early",
+  "9568-G4_Gl_Early","9568-D2_Gl_Early",
+  "9784-G4_Gl_Early","9784-D4_Gl_Early",
+  "9757-G4_Gl_Early","9757-D4_Gl_Early","9757-G3_Gl_Early","9757-D3_Gl_Early",
+  "9052_Jx","9052_Tm","8943_Jx","8943_Tm",
+  "9341_Gl_Late","8988_Jx","8988_Tm",
+  "9424_Jx","8962_Jx","8962_Tm","9423_Jx","8903_Jx"
+)
+```
+```{r}
+Data_dir <- "C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/MiniBulk_DRAG/"
+
+# Load QC-filtered BCM datasets 
+# 1. Summary table per sample after merging on LV distance
+BCM1_QC4_MergeOnLV_Nmice_Pgen <- qs::qread(paste0(Data_dir, "BCM1_QC4_MergeOnLV_Nmice_Pgen.qs"))
+
+#2. All barcodes, before merging on LV distance
+AllBCM1_R2umi_QC4_Pgen <- qs::qread(paste0(Data_dir, "AllBCM1_R2umi_QC4_Pgen.qs"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+# Pgen-based analyses and visualization 
+
+
+
+## Pgen vs barcode sharing
+
+
+Scatter plot : 
+```{r}
+
+BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  mutate(Pgen = case_when( is.finite(Pgen) == F ~10**-12,
+                           TRUE ~ Pgen)) %>%
+  dplyr::filter(!is.na(Pgen), is.finite(Pgen)) %>%   # Replace missing or infinite Pgen values with a minimal value
+   group_by(BCM_LVmerged) %>%
+  summarise(
+    Pgen = dplyr::first(Pgen),
+    Barcode_sharing_mice_N = max(Barcode_sharing_mice_N),
+    .groups = "drop"
+  ) %>%
+  mutate(Barcode_sharing_mice_Factor = case_when(Barcode_sharing_mice_N == 1  ~ "unique",
+                                                 Barcode_sharing_mice_N > 1 & Barcode_sharing_mice_N < 10 ~ "2-9",
+                                                 Barcode_sharing_mice_N>=10 ~  ">10/17")) %>%
+  mutate(Barcode_sharing_mice_Factor = factor(Barcode_sharing_mice_Factor,
+                                              levels = c("unique", "2-9",
+                                                         ">10/17"))) %>%
+  
+  ggplot(aes(x = Pgen, y = Barcode_sharing_mice_N, 
+             fill = Barcode_sharing_mice_Factor)) +
+  geom_point(shape = 21, size = 3,
+             position = position_jitter(width = 0.1, height = 0.1)) +
+  scale_x_log10()+
+  geom_vline(xintercept = 10**-4.5)+
+  
+  labs(
+    x = "Pgen", y = "N mice",
+    fill = "Barcode sharing (# mice)",
+    title = "Pgen distribution by barcode sharing") +
+
+  theme_classic()
+```
+
+2. Pgen distribution histogram
+
+```{r}
+BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+ mutate(Pgen = case_when( is.finite(Pgen) == F ~10**-12,
+                           TRUE ~ Pgen))%>%
+  group_by(BCM_LVmerged) %>%
+    summarise(
+    Pgen = dplyr::first(Pgen),
+    Barcode_sharing_mice_N = max(Barcode_sharing_mice_N),
+    .groups = "drop"
+  ) %>%
+  mutate(Barcode_sharing_mice_Factor = 
+           case_when(Barcode_sharing_mice_N == 1  ~ "unique",
+                     Barcode_sharing_mice_N > 1 & Barcode_sharing_mice_N < 10 ~ "2-9",
+                     Barcode_sharing_mice_N>=10 ~  ">10/17")) %>%
+  mutate(Barcode_sharing_mice_Factor = 
+           factor(Barcode_sharing_mice_Factor,
+            levels = c("unique", "2-9", ">10/17"))) %>%
+  
+  ggplot(aes(x = -log10(Pgen), fill = Barcode_sharing_mice_Factor)) +
+  geom_histogram(alpha = 0.5, aes(y = after_stat(count))) +
+   geom_vline(xintercept = 4.5)+
+
+  labs(
+    x = "Pgen",
+    fill = "Barcode sharing (# mice)",
+    title = "Pgen distribution by barcode sharing") +
+
+  theme_classic()
+
+```
+
+
+Threshold scan: relationship between Pgen and barcode sharing : 
+```{r}
+
+df <- BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  mutate(Pgen = case_when( is.finite(Pgen) == F ~10**-12,
+                           TRUE ~ Pgen))%>%
+   group_by(BCM_LVmerged) %>%
+    summarise(
+    Pgen = dplyr::first(Pgen),
+    Barcode_sharing_mice_N = max(Barcode_sharing_mice_N),
+    .groups = "drop"
+  )
+
+# Explore multiple Pgen cutoffs (10^0 to 10^-11)
+thr_grid <- seq(0, 11, by = 0.5)
+
+res <- lapply(thr_grid, function(x){
+
+  thr <- 10^-x
+
+  sub <- df %>% dplyr::filter(Pgen <= thr)
+
+  if(nrow(sub) == 0){
+    return(data.frame(x = x, frac = NA))
+  }
+  # Fraction of barcodes shared across ≥2 mice
+  frac_shared <- mean(sub$Barcode_sharing_mice_N > 1)
+
+  data.frame(
+    x = x,
+    frac = frac_shared
+  )
+
+}) %>% bind_rows()
+
+# Number of barcodes retained at each threshold
+res$n <- sapply(thr_grid, function(x){
+  sum(df$Pgen <= 10^-x)
+})
+
+# plot
+
+ggplot(res, aes(x = x, y = frac)) +
+  geom_point(size = 3) +
+  geom_text(aes(label = n), vjust = -1, size = 3)+
+  labs(
+    x = expression("Pgen threshold 10"^-x),
+    y = "Fraction barcode shared between mice"
+  ) +
+  theme_classic()
+```
+
+```{r}
+# Relationship between barcode generation probability and abundance
+BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  
+  ggplot(aes(x= -log10(Pgen), y = n_umi_distinct)) +
+  geom_point(shape = 21, alpha = 0.5)+
+  theme_classic() + 
+  scale_y_log10() +
+  
+BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  
+  ggplot(aes(x= -log10(Pgen), y = n_umi_distinct)) +
+  geom_point(shape = 21, alpha = 0.5)+
+  theme_classic() 
+
+#Pgen discretization vs abundance
+BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  
+    # Bin Pgen into log10 intervals for visualization
+  mutate(Pgen_disc = case_when(Pgen < 10**-12 |is.na(Pgen) ~ "<-12",
+                               Pgen > 10**-12 & Pgen < 10**-11 ~ "-12, -11",
+                                Pgen > 10**-11 & Pgen < 10**-10 ~ "-11, -10",
+                                Pgen > 10**-10 & Pgen < 10**-9 ~ "-10, -9",
+                                Pgen > 10**-9 & Pgen < 10**-8 ~ "-9, -8",
+                                Pgen > 10**-8 & Pgen < 10**-7 ~ "-8, -7",
+                                Pgen > 10**-7 & Pgen < 10**-6 ~ "-7, -6",
+                                Pgen > 10**-6 & Pgen < 10**-5 ~ "-6, -5",
+                                Pgen > 10**-5 & Pgen < 10**-4 ~ "-5, -4",
+                                Pgen > 10**-4 & Pgen < 10**-3 ~ "-4, -3",
+                                Pgen > 10**-3 & Pgen < 10**-2 ~ "-3, -2",
+                                Pgen > 10**-2 & Pgen < 10**-1 ~ "-2, -1",
+                                Pgen > 10**-1 & Pgen < 10**-0 ~ "-1, 0")) %>%
+  
+  ggplot(aes(x= Pgen_disc, y = n_umi_distinct)) +
+  geom_boxplot()+
+  theme_classic() +
+  scale_y_log10()+
+  scale_x_discrete(limits = c("<-12",    "-12, -11","-11, -10",    "-10, -9",  "-9, -8",     "-8, -7",        "-7, -6",  "-6, -5",  "-5, -4",         "-4, -3",    "-3, -2"))
+
+
+```
+
+## Pgen control
+###Clone number
+```{r}
+# Pgen thresholds
+thr_vec <- 10^seq(0, -7, by = -0.25)
+
+# Compute clone number for each threshold
+dt_thr <- purrr::map_dfr(thr_vec, function(thr){
+
+  BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+    filter(
+      TypeSample_sh_v2 %in% c("EARLY_2m","EARLY_3m","LATE","Tm"),
+      Pgen <= thr          # adapter si nécessaire
+    ) %>%
+    group_by(SampleBio, TypeSample_sh_v2) %>%
+    summarise(
+      CloneNumber = n_distinct(BCM_LVmerged),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      Thr = thr,
+      logThr = -log10(thr)    )
+
+})
+
+stats <- purrr::map_dfr(thr_vec, function(thr){
+
+  dat <- BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+    filter(
+      TypeSample_sh_v2 %in% c("EARLY_2m","EARLY_3m","LATE"),
+      Pgen <= thr    ) %>%
+
+    group_by(SampleBio, TypeSample_sh_v2) %>%
+    summarise(
+      CloneNumber = n_distinct(BCM_LVmerged),
+      .groups = "drop"
+    )     %>%
+
+  dunn_test(
+    CloneNumber ~ TypeSample_sh_v2,
+    p.adjust.method = "BH"
+  ) %>%
+    mutate(
+      Thr = thr,
+      logThr = -log10(thr)    )
+
+})
+
+stats
+
+
+
+
+dt_sum <- dt_thr %>%
+  group_by(TypeSample_sh_v2, Thr, logThr) %>%
+  summarise(
+    median = median(CloneNumber),
+    mean = mean(CloneNumber),
+    q25 = quantile(CloneNumber, 0.25),
+    q75 = quantile(CloneNumber, 0.75),
+    .groups = "drop"  )
+
+stats <- stats %>%
+  mutate(
+    y.position = max(dt_sum$median_umi) * 1.05
+  )
+
+
+P_clones_thr <- ggplot(dt_sum,
+                       aes(logThr, mean)) +
+
+  geom_line(size = 1.2, aes( color = TypeSample_sh_v2,     fill = TypeSample_sh_v2)) +
+  geom_point(size = 2, aes( color = TypeSample_sh_v2,     fill = TypeSample_sh_v2)) +
+
+  labs(
+    x = expression(-log[10](Pgen~threshold)),
+    y = "Mean number of clones"  ) +
+  theme_classic()
+
+P_clones_thr
+
+
+P_clones_thr +
+  ggpubr::stat_pvalue_manual(    stats,
+    x = "logThr",    y.position = "y.position",    hide.ns = T  )
+```
+### Clone size
+```{r}
+
+library(dplyr)
+library(broom)
+
+
+# Pgen thresholds
+thr_vec <- 10^seq(0, -7, by = -0.5)
+
+dt_thr <- purrr::map_dfr(thr_vec, function(thr){
+
+  BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+    filter(
+      TypeSample_sh_v2 %in% c("EARLY_2m","EARLY_3m","LATE"),
+      Pgen <= thr          ) %>%
+    group_by(TypeSample_sh_v2) %>%
+    summarise(
+      median_umi = median(n_umi_distinct, na.rm = TRUE),
+      q25 = quantile(n_umi_distinct, 0.25, na.rm = TRUE),
+      q75 = quantile(n_umi_distinct, 0.75, na.rm = TRUE),
+      .groups = "drop"    ) %>%
+    mutate(
+      Thr = thr,
+      logThr = -log10(thr)    )
+
+})
+
+stats <- purrr::map_dfr(thr_vec, function(thr){
+  dat <- BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+    filter(
+      TypeSample_sh_v2 %in% c("EARLY_2m","EARLY_3m","LATE"),
+      Pgen <= thr    )
+
+  fit <- aov(n_umi_distinct ~ TypeSample_sh_v2, data = dat)
+
+  broom::tidy(fit) %>%
+    filter(term == "TypeSample_sh_v2") %>%
+    transmute(
+      Thr = thr,
+      logThr = -log10(thr),
+      p = p.value
+    )
+})
+
+stats <- stats %>%
+  mutate(
+    y.position = max(dt_thr$median_umi, na.rm = TRUE) * 1.05,
+    label = paste0(signif(p, 2))
+  )
+
+P_UMI_thr <- ggplot(dt_thr,
+                    aes(logThr, median_umi)) +
+  geom_line(linewidth = 1.2, aes(color = TypeSample_sh_v2,fill = TypeSample_sh_v2)) +
+  geom_point(size = 2, aes(color = TypeSample_sh_v2,fill = TypeSample_sh_v2)) +
+  theme_classic() +
+  labs(
+    x = expression(-log[10](Pgen~threshold)),
+    y = "Median clone size"  )
+
+P_clones_thr |  P_UMI_thr +
+  geom_text(
+    data = stats,
+    aes(x = logThr, y = y.position, label = label),
+    inherit.aes = FALSE,
+    size = 3
+  )
+```
+
+
+Not used
+
+
+
+# #### VISUALIZATION ####
+
+
+
+```{r}
+# Ensure sample order is consistent across plots
+BCM1_QC4_MergeOnLV_Nmice_Pgen$SampleBio <- factor(BCM1_QC4_MergeOnLV_Nmice_Pgen$SampleBio, levels = (x_order_))
+
+
+BCM1_QC4_MergeOnLV_Nmice_Pgen <- BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+    # refine sample grouping
+  mutate(TypeSample_sh_v2 = case_when(BCM_LVmergedbzl_Figure %in% c("1.5m",  "2.0m", "2.2m" ) ~             "EARLY_2m",
+                                      BCM_LVmergedbzl_Figure %in% c("2.6m","3.2m", "3.3m", "3.8m", "4.3m") ~"EARLY_3m",
+                                      TypeSample_sh == "LATE" ~                                             "LATE",
+                                      TRUE ~ "others"))
+
+############################################
+# QC Summaries
+############################################
+
+# Number of barcodes per sample and condition
+BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  ungroup()%>%
+  group_by(SampleBio, TypeSample_sh_v2 ) %>%
+  summarize(barcodes = length((BCM_LVmerged)))
+
+
+# Number of Minibuk per condition
+by(BCM1_QC4_MergeOnLV_Nmice_Pgen$BCM_LVmerged, 
+   BCM1_QC4_MergeOnLV_Nmice_Pgen$TypeSample_sh_v2, 
+   function(X){length(X)})
+
+# Number of cells
+by(BCM1_QC4_MergeOnLV_Nmice_Pgen$Nb_cells, 
+   BCM1_QC4_MergeOnLV_Nmice_Pgen$TypeSample_sh_v2, 
+   FUN = function(X){sum(unique(X))})
+
+```
+
+## Fig 3c. - Bubble with density
+
+```{r}
+BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  subset(SampleBio %in% c( "9891-G4_Gl_Early", "9891-D4_Gl_Early" ,  "8988_Jx", "8988_Tm"    )) %>%
+  
+  ggplot( aes(x = n_umi_distinct, fill = TypeSample_sh))+
+  geom_density(alpha = 0.5, position = "identity", adjust = 0.8) +
+  geom_jitter( aes(y = 0, size = n_umi_distinct),
+    height = 0.02, width = 0, alpha = 0.6,  shape = 21, color = "black") +
+  scale_x_log10() +
+  facet_grid(SampleBio ~ .) +
+  scale_fill_manual(values =cols_Group) +
+  theme_classic() +
+  theme(  strip.text.y = element_text(angle = 0),
+    axis.text.y = element_text(size = 9)) +
+  labs(x = "N UMI distinct", y = "Density", fill = "TypeSample") %>%
+  
+  print()
+```
+
+
+
+
+## Ext Fig 5c. Density + jitter per sample
+```{r}
+BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  subset( TypeSample_sh_v2 %in% c("EARLY_2m","EARLY_3m", "LATE")  ) %>%
+  
+  ggplot( aes(x = n_umi_distinct, y = SampleBio, fill = TypeSample_sh_v2, group = SampleBio))+
+  geom_density_ridges(alpha = 0.6, scale = 1.2, rel_min_height = 0.01) +
+  scale_x_log10(limits = c(0.1, 100000)) +
+  scale_fill_manual(values = c(cols_Group, "grey")) +
+  theme_classic() +
+
+  theme(  strip.text.y = element_text(angle = 0),
+  axis.text.y = element_text(size = 9)) +
+  labs(x = "N UMI distinct", y = "Density", fill = "TypeSample") %>%
+  
+  print()
+```
+
+## Fig 3d. Clone number
+
+```{r}
+# Number of clone by mammary gland
+dt <- BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  filter(TypeSample_sh_v2 %in% c("EARLY_2m", "EARLY_3m", "LATE", "Tm") ) %>% #, Barcode_sharing_mice_N <= 1) %>%
+  group_by(SampleBio, TypeSample_sh_v2) %>%
+  summarise(CloneNumber = n_distinct(BCM_LVmerged), .groups = "drop") %>%
+  left_join(BCM1_QC4_MergeOnLV_Nmice_Pgen[,c("SampleBio", "BCM_LVmergedbzl_Figure")], by = "SampleBio") %>%
+  distinct() %>%
+  mutate(Age = gsub("m", "", BCM_LVmergedbzl_Figure) %>% as.numeric)
+
+head(dt)
+
+
+# summary by bilogical group
+dt_sum <- dt %>%
+  group_by(TypeSample_sh_v2) %>%
+  summarise(
+    m = mean(CloneNumber),
+    s = sd(CloneNumber),
+    .groups = "drop" )
+
+# Plot
+P_clones <- ggplot(dt_sum, aes(x = TypeSample_sh_v2, y = m, fill = TypeSample_sh_v2)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_point(
+    data = dt,
+    aes(x = TypeSample_sh_v2, y = CloneNumber, fill = TypeSample_sh_v2),
+    alpha = 0.6, shape = 21, position = position_jitter(width = 0.2, height = 0), size = 3
+  ) +
+  geom_errorbar(aes(ymin = m , ymax = m + s), width = 0.2) +
+  scale_fill_manual(values = cols_Group) +
+  theme_classic() +
+  labs(x = "TypeSample", y = "NCloneNumber", fill = "TypeSample")
+
+
+
+P_clones
+```
+
+```{r}
+# Statistics
+aov(CloneNumber ~ TypeSample_sh_v2, data = dt) %>% summary()
+TukeyHSD(aov(CloneNumber ~ TypeSample_sh_v2, data = dt))
+
+```
+
+
+## Fig 3e. Clone size
+
+```{r}
+
+df_plot <- BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  subset(TypeSample_sh_v2 %in% c("EARLY_2m","EARLY_3m", "LATE")) %>%
+  group_by(TypeSample_sh_v2, TypeSample_sh) %>%
+  summarise(
+    mean_umi = mean(n_umi_distinct, na.rm = TRUE),
+    sd_umi   = sd(n_umi_distinct, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+p1 <-  ggplot(df_plot, aes(x = mean_umi, y = TypeSample_sh_v2, fill = TypeSample_sh)) +
+  geom_col(alpha = 0.7, color = "black") +
+  geom_jitter(data = BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  subset( TypeSample_sh_v2 %in% c("EARLY_2m","EARLY_3m", "LATE")  ),
+  aes(x = n_umi_distinct, y = TypeSample_sh_v2, fill = TypeSample_sh),
+  height = 0.02, width = 0, alpha = 0.6,  shape = 21, color = "black") +
+  geom_errorbarh(aes(xmin = mean_umi,
+                     xmax = mean_umi + sd_umi),
+                 height = 0.2) +
+  scale_fill_manual(values = cols_Group) +
+  scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),
+              labels = scales::trans_format("log10", scales::math_format(10^.x)))+
+  theme_classic() +
+  theme(strip.text.y = element_text(angle = 0),
+        axis.text.y = element_text(size = 9)) +
+  coord_flip() +
+  labs(x = "N UMI distinct (mean ± SD)", y = "", fill = "TypeSample")
+
+
+p2 <- BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  subset( TypeSample_sh_v2 %in% c("EARLY_2m","EARLY_3m", "LATE")  ) %>%
+  
+  ggplot( aes(x = n_umi_distinct, y = TypeSample_sh_v2, fill = TypeSample_sh))+
+  geom_jitter( height = 0.2, width = 0, alpha = 0.6,  shape = 21, color = "black") +
+  geom_boxplot(width = 0.4, outliers = F, alpha = 0.5)+
+  scale_x_log10(limits = c(0.1, 100000)) +
+  scale_fill_manual(values =cols_Group) +
+  theme_classic() +
+  theme(  strip.text.y = element_text(angle = 0),
+  axis.text.y = element_text(size = 9)) +
+  coord_flip()+
+  labs(x = "N UMI distinct", y = "", fill = "TypeSample")
+
+p1 + p2
+
+```
+
+Statistical comparisons
+```{r}
+aov((n_umi_distinct) ~ TypeSample_sh_v2, 
+    data = BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  subset( TypeSample_sh_v2 %in% c("EARLY_2m","EARLY_3m", "LATE")  ) ) %>% summary()
+
+TukeyHSD(aov((n_umi_distinct) ~ TypeSample_sh_v2, 
+             data = BCM1_QC4_MergeOnLV_Nmice_Pgen %>%
+  subset( TypeSample_sh_v2 %in% c("EARLY_2m","EARLY_3m", "LATE") ) ))
+
+```
+
+
+
+
+
+
+## Ext Fig2n. Correlograme
+```{r}
+# Build clone × sample matrix
+mat <- AllBCM1_R2umi_QC4_Pgen %>%
+  filter(QC4_LV == "Pass") %>% 
+  dplyr::select(samplename, BCM_LVmerged, n_umi_distinct) %>%
+  tidyr::pivot_wider(names_from = samplename, values_from = n_umi_distinct, values_fill = 0) 
+
+
+cor_mat <- cor(mat %>% select(-BCM_LVmerged), method = "pearson", use = "pairwise.complete.obs")
+
+# Annotation metadata for heatmap
+annot <- AllBCM1_R2umi_QC4_Pgen %>%
+  filter(QC4_LV == "Pass" ) %>%
+  distinct(samplename, SampleBio, Ncell, TypeSample, mouseV2) %>%
+  column_to_rownames("samplename") %>%
+  mutate(Ncell = as.numeric(Ncell))
+
+ha <- HeatmapAnnotation(
+
+  TypeSample = annot$TypeSample,
+  Mouse = annot$mouseV2,
+    SampleBio = annot$SampleBio,
+  Ncell = annot$Ncell,
+  col = list(
+    TypeSample = structure(
+       sample(colorRampPalette(brewer.pal(8, "Spectral"))(length(unique(annot$TypeSample)))),
+      names = unique(annot$TypeSample)),
+    Mouse = structure(
+       sample(colorRampPalette(brewer.pal(8, "Greens"))(length(unique(annot$mouseV2)))),
+      names = unique(annot$mouseV2)),
+    SampleBio = structure(
+       sample(colorRampPalette(brewer.pal(8, "Greys"))(length(unique(annot$SampleBio)))),
+      names = unique(annot$SampleBio)),
+     
+    Ncell = colorRamp2(c(1, 10, 20,40, 50,80, 100,  200), colorRampPalette(brewer.pal(8, "YlGnBu"))(8))))
+
+All <- Heatmap(cor_mat,
+        name = "Pearson r",
+        top_annotation = ha,
+        col = colorRamp2(  seq(0, 1, length.out = 10),  c("white", brewer.pal(9, "Reds"))),
+        clustering_distance_rows = "pearson",
+        clustering_method_rows = "ward.D2",
+        clustering_distance_columns  = "pearson",
+        clustering_method_columns  = "ward.D2",
+        show_row_names = F,
+        show_column_names = F, use_raster = TRUE)
+
+######### Zoom one sample
+# ------------------------------------------------
+Sample_tested <- "9568-G4_Gl_Early" #"9757-G3_Gl_Early"
+mat <- AllBCM1_R2umi_QC4_Pgen %>%
+  ungroup() %>%
+  filter(SampleBio %in% Sample_tested) %>%
+  filter(QC4_LV == "Pass") %>% 
+  filter(TypeSample %in% c("Gl_Early", "Gl_Late", "Jx", "Tm")) %>% 
+  dplyr::select(samplename, BCM_LVmerged, n_umi_distinct) %>%
+  tidyr::pivot_wider(names_from = samplename, values_from = n_umi_distinct, values_fill = 0) 
+
+mat_cor <- mat %>% 
+  dplyr::select(-BCM_LVmerged)
+
+cor_mat <- cor(mat_cor, method = "pearson", use = "pairwise.complete.obs")
+
+annot <- AllBCM1_R2umi_QC4_Pgen %>%
+  ungroup() %>%
+    filter(SampleBio %in% Sample_tested) %>%
+    filter(TypeSample %in% c("Gl_Early", "Gl_Late", "Jx", "Tm")) %>% 
+    #subset(Pgen <= Thr_Pgen) %>%
+    filter(SampleBio %in% Sample_tested) %>%
+    subset(QC4_LV == "Pass") %>% 
+  distinct(samplename, SampleBio, Ncell, TypeSample) %>%
+  column_to_rownames("samplename") %>%
+  mutate(Ncell = as.numeric(Ncell))
+
+ha <- HeatmapAnnotation(
+  SampleBio = annot$SampleBio,
+  Ncell = annot$Ncell,
+  TypeSample = annot$TypeSample,
+  col = list(
+    SampleBio = structure(
+      rand_color(length(unique(annot$SampleBio))),
+      names = unique(annot$SampleBio)),
+     TypeSample = structure(
+      rand_color(length(unique(annot$TypeSample))),
+      names = unique(annot$TypeSample)),
+    Ncell = colorRamp2(c(0,100), c("lightblue", "darkblue"))))
+
+One <- Heatmap(cor_mat,
+        name = "Pearson r",
+        top_annotation = ha,
+        col = colorRamp2(  seq(0, 1, length.out = 10),  c("white", brewer.pal(9, "Reds"))),
+        clustering_distance_rows = "pearson",
+        clustering_method_rows = "ward.D2",
+        clustering_distance_columns  = "pearson",
+        clustering_method_columns  = "ward.D2",
+        show_row_names = F,
+        show_column_names = F)
+
+
+#Final output
+All %>% print()
+One %>% print()
+```
+
+

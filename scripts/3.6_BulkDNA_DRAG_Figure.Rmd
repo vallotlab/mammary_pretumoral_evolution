@@ -1,0 +1,302 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+Barcodes representing less than 0.2% of sequencing reads within a sample were discarded.
+For each retained barcode, the probability of generation (Pgen) was assigned whenever the barcode had previously been identified in “MiniBulk” and “scRNA” reference datasets. Pgen values were inferred from these previously characterized datasets.
+ A threshold of Pgen < 10⁻⁴ was selected based on an empirical analysis relating Pgen to barcode sharing across biological replicates (fraction of barcodes shared between mice), which resulted in more than 90% of retained barcodes being unique to a single mouse. Barcodes that were not detected in the reference datasets - more than 30 independent biological samples- were assumed to represent rare, low-generation-probability barcodes and were therefore retained for downstream analyses.
+ 
+# Intro
+
+```{r}
+library(ggExtra) ; library(ggplot2) ; library(patchwork)
+
+
+```
+
+```{r}
+AllBCM1_barcodesBulk <- qs::qread("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/Bulk_DRAG/DRAG_Bulk.qs")
+
+```
+
+
+
+# Barcode filtering based on sequencing depth
+
+
+```{r}
+# Filtering threshold:
+# A barcode is retained if its read count represents more than
+# 0.2% of the total reads obtained for the corresponding sample.
+
+# Total sequencing depth per sample is stored in:
+# barcodesBulk@metadata$raw_read_count
+
+AllBCM1_barcodesBulk$Thr <- AllBCM1_barcodesBulk$barcode_read_count * 0.002
+
+AllBCM1_barcodesBulk <- AllBCM1_barcodesBulk %>% 
+  mutate(Filter_1 = case_when(count >Thr ~ "Pass",
+                              TRUE ~"Fail"))
+
+
+
+# ============================================================
+# Assess technical replicate reproducibility
+# ============================================================
+
+ AllBCM1_barcodesBulk %>%
+  dplyr::select(ech, barcode_seq, rep, count, Filter_1, type) %>%
+  distinct() %>%
+  pivot_wider(
+    names_from = rep,
+    values_from = count,
+    names_prefix = "count_") %>%
+   filter(type %in% c("JBAS", "JLUM", "TUMOR", "LYMPH")) %>%
+   ggplot( aes(x = count_a, y = count_b, fill = Filter_1)) +
+  geom_point(shape = 21, size = 3, alpha = 0.8, color = "black") +
+  scale_x_log10() +
+  scale_y_log10() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  theme_minimal(base_size = 14) +
+  labs(
+    x = "Count (rep a)",
+    y = "Count (rep b)",
+    fill = "Échantillon",
+    title = "Comparaison des réplicats techniques (a vs b)"
+  )+ facet_wrap(type~ech)
+
+```
+
+
+
+#Barcode filtering based on Pgen
+```{r}
+# ============================================================
+# Determine the optimal Pgen threshold
+# ============================================================
+
+# Retain barcodes passing the read-count filter
+# Missing Pgen values are assigned a very small value (10^-12)
+# so that they are retained during threshold exploration.
+
+df <- AllBCM1_barcodesBulk_Pgen %>%
+   dplyr::filter(Filter_1 == "Pass") %>% 
+  mutate(Pgen = case_when( is.finite(Pgen) == F ~10**-12,
+                           is.na(Pgen) == T  ~10**-12, 
+                           TRUE ~ Pgen))%>%
+   group_by(Barcode_long) %>%
+    summarise(
+    Pgen = dplyr::first(Pgen),
+    Barcode_sharing_mice_N = n_distinct(mouse),
+    .groups = "drop"
+  )
+
+# Evaluate a series of Pgen thresholds (10^0 to 10^-11)
+thr_grid <- seq(0, 11, by = 0.5)
+
+res <- lapply(thr_grid, function(x){
+
+  thr <- 10^-x
+
+  sub <- df %>% dplyr::filter(Pgen <= thr )
+
+  if(nrow(sub) == 0){
+    return(data.frame(x = x, frac = NA))
+  }
+
+    # Fraction of barcodes detected in more than one mouse
+  frac_shared <- mean(sub$Barcode_sharing_mice_N > 1)
+
+  data.frame(
+    x = x,
+    frac = frac_shared
+  )
+
+}) %>% bind_rows()
+
+# Number of retained barcodes at each threshold
+res$n <- sapply(thr_grid, function(x){
+  sum(df$Pgen <= 10^-x)
+})
+
+
+# ------------------------------------------------------------
+# Plot barcode sharing as a function of the Pgen threshold
+# ------------------------------------------------------------
+ggplot(res, aes(x = x, y = frac)) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 3.8)+
+  geom_text(aes(label = n), vjust = -1, size = 3)+
+  labs(
+    x = expression("Pgen threshold 10"^-x),
+    y = "Fraction barcode shared between mice"
+  ) +
+  theme_classic()
+
+```
+ 
+
+## Control by Pgen
+
+```{r}
+meta <- AllBCM1_barcodesBulk_Pgen[, c("mouse", "ech", "type", "Pgen")] %>% distinct()
+  
+
+
+# Filtering strategy:
+# 1. Keep barcodes passing the read-count threshold.
+# 2. Require detection in both technical replicates.
+# 3. Average counts across technical replicates.
+  
+Filt_BCM1 <- AllBCM1_barcodesBulk_Pgen %>%
+  dplyr::filter(Filter_1 == "Pass") %>% 
+  group_by(barcode_seq) %>%
+  ungroup() %>% 
+  group_by(barcode_seq, ech) %>%
+  dplyr::filter(n_distinct(rep) == 2) %>%  # average replicate counts
+  group_by(barcode_seq, ech) %>%
+  dplyr::summarise(count = mean(count), .groups ="drop") %>%
+  ungroup() %>%
+  left_join(meta[, c("mouse", "ech", "type", "Pgen")], by = "ech") %>%
+  distinct() 
+
+head(Filt_BCM1)
+```
+```{r}
+# ============================================================
+# Visualize filtered barcode abundance across samples
+# ============================================================
+Filt_BCM1 %>% 
+  
+    # Compute barcode frequency within each sample
+  group_by(ech) %>%
+  mutate(total_reads = sum(count),
+         frac = count / total_reads) %>%
+  ungroup() %>%
+  
+  mutate(type = factor(type, levels = c("JLUM", "JBAS"))) %>%
+
+  
+  ggplot( aes(x = ech, y = count, group = barcode_seq, fill = type)) +
+  geom_point(aes(size = frac), alpha = 0.8, shape = 21,
+             position = position_jitter(width = 0.1)) +   # Barcode abundance
+  scale_y_log10() +
+  scale_size_continuous(range = c(1, 8)) +
+  geom_line(aes(group = barcode_seq), alpha = 0.5, color = "black") +  # Connect the same barcode detected in paired epithelial compartments
+  theme_classic(base_size = 14) +
+  labs(x = "Sample", y = "Count", color = "Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_fill_manual(values = c(  "#a01858", "#236ec4")) + 
+  scale_x_discrete(limits = rev(c( "M7854_JBAS", "M7854_JLUM","",        
+                                   "M7915_JBAS", "M7915_JLUM",". ",                              
+                                   "M7916_JBAS", "M7916_JLUM", "..",                            
+                                   "M7944_JBAS"   ,"M7944_JLUM")))
+
+
+```
+
+
+## Filter by Pgen
+
+
+```{r}
+# ============================================================
+# Filter lineage barcodes
+# ============================================================
+
+
+meta <- AllBCM1_barcodesBulk_Pgen[, c("mouse", "ech", "type")] %>% distinct()
+  
+
+
+# Filtering strategy:
+# 1. Keep barcodes passing the read-count threshold.
+# 2. Retain barcodes with Pgen ≤ 10^-3.8 (or missing Pgen).
+# 3. Require detection in both technical replicates.
+# 4. Average counts across technical replicates.
+  
+Filt_BCM1 <- AllBCM1_barcodesBulk_Pgen %>%
+  dplyr::filter(Filter_1 == "Pass") %>% 
+  group_by(barcode_seq) %>%
+  filter(Pgen <= 10**-3.8 | is.na(Pgen) | is.nan(Pgen)) %>%
+  ungroup() %>% 
+  group_by(barcode_seq, ech) %>%
+  dplyr::filter(n_distinct(rep) == 2) %>%  # average replicate counts
+  group_by(barcode_seq, ech) %>%
+  dplyr::summarise(count = mean(count), .groups ="drop") %>%
+  ungroup() %>%
+  left_join(meta[, c("mouse", "ech", "type")], by = "ech") %>%
+  distinct() 
+
+head(Filt_BCM1)
+```
+
+
+```{r}
+# ============================================================
+# Visualize filtered barcode abundance across samples
+# ============================================================
+Filt_BCM1 %>% 
+  
+    # Compute barcode frequency within each sample
+  group_by(ech) %>%
+  mutate(total_reads = sum(count),
+         frac = count / total_reads) %>%
+  ungroup() %>%
+# Keep epithelial compartments only
+  filter(!(type %in% c( "LYMPH", "TUMOR"))) %>%
+ 
+  
+  mutate(type = factor(type, levels = c("JLUM", "JBAS"))) %>%
+
+  
+  ggplot( aes(x = ech, y = count, group = barcode_seq, fill = type)) +
+  geom_point(aes(size = frac), alpha = 0.8, shape = 21,
+             position = position_jitter(width = 0.1)) +   # Barcode abundance
+  scale_y_log10() +
+  scale_size_continuous(range = c(1, 8)) +
+  geom_line(aes(group = barcode_seq), alpha = 0.5, color = "black") +  # Connect the same barcode detected in paired epithelial compartments
+  theme_classic(base_size = 14) +
+  labs(x = "Sample", y = "Count", color = "Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_fill_manual(values = c(  "#a01858", "#236ec4")) + 
+  scale_x_discrete(limits = rev(c( "M7854_JBAS", "M7854_JLUM","",        
+                                   "M7915_JBAS", "M7915_JLUM",". ",                              
+                                   "M7916_JBAS", "M7916_JLUM", "..",                            
+                                   "M7944_JBAS"   ,"M7944_JLUM")))
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

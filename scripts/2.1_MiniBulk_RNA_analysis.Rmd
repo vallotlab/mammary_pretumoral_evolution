@@ -1,0 +1,1311 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(data.table)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+
+library(Seurat)
+library(patchwork)
+library(DoubletFinder)
+
+library(ggplot2)
+library(gridExtra)
+library(ggExtra)
+library(viridis)
+library(Matrix)
+library("ggsci")
+library(cowplot)
+library(platetools)
+library(scales)
+library("gridExtra")
+library(ggpubr)
+library(RColorBrewer)
+library(tidyr)
+library(dplyr)
+library(ggforce)
+
+#To add filename
+read_plus <- function(flnm) {
+    read.csv(flnm, header = TRUE, na.strings=c("", " ")) %>% 
+        mutate(filename = flnm)
+}
+
+# Def Paths
+Input_Dir <- "C:/Users/Marthe Laisne/Desktop/FlashSeq_MultiOneCell/Data/MiniBulk_FullTranscriptome/N320/"
+Output_Dir <- "C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/MiniBulkRNA/"
+```
+
+
+# Pre-processing of the transcriptome dataset:
+Raw FLASH sequencing files were processed using the scRNA-SmartSeq3 Nextflow pipeline developed by the Curie Institute (https://github.com/bioinfo-pf-curie/scRNA-SmartSeq3). Briefly, UMIs were extracted from tagged reads using umi-tools (v1.1.1), 3' linkers and poly(A) tails were trimmed with cutadapt (v3.3), and reads were aligned to the mouse reference genomes (mm10) using STAR (v2.7.8a). UMI-count matrices were used for all downstream analyses.
+
+
+## Metadata construction with lineage barcode addition
+```{r}
+#Load Data
+Input_Data= list.dirs(Input_Dir)[-1]
+Input_Data <- Input_Data[grep("*10XlikeMatrix_umi", Input_Data)]
+
+rna.data <- Read10X(data.dir =Input_Data)
+rna_seurat_umi <- CreateSeuratObject(counts = rna.data,
+                             min.cells = 1,
+                             min.features = 100,
+                             project = "mouse_MiniBulk")
+
+rna_seurat_umi@meta.data$SampleName <- colnames(rna_seurat_umi)
+```
+
+
+Expression matrices were processed in R (v4.4.1) using the Seurat (v5.1) package.
+
+Lineage barcode information, including barcode identity, relative barcode frequencies and corresponding Pgen values, was added to the objects for downstream analyses.
+
+```{r}
+#Load BCM1 information (post QC)
+Res_dir <- "C:/Users/Marthe Laisne/Desktop/FlashSeq_MultiOneCell/Results/Fig3_MiniBulk_Igor/"
+
+AllBCM1_R2umi_QC4 <- qs::qread(paste0(Res_dir, "AllBCM1_R2umi_QC4_Pgen.qs"))
+head(AllBCM1_R2umi_QC4)
+```
+```{r}
+#Match plate information
+AllBCM1_R2umi_QC4 <- AllBCM1_R2umi_QC4 %>%
+  mutate(plaque = case_when(plaque %in% c("1","2") ~ paste0("LatePlq", plaque),
+                            plaque == "Early1"~"EarlyPlq1",
+                            plaque == "Early2"~"EarlyPlq2",
+                            plaque == "Early3"~"EarlyPlq3",
+
+                            TRUE ~ plaque))
+
+
+Summary_BCM1_perwell <-  AllBCM1_R2umi_QC4 %>%
+  subset(QC4_LV == "Pass") %>%
+  subset(Pgen  <= 10**-4.5) %>%
+  group_by(samplename, BCM_LVmerged) %>%
+  summarise(n_umi_distinct = sum(n_umi_distinct), .groups = "drop"
+  ) %>%
+  left_join(AllBCM1_R2umi_QC4 %>% 
+              dplyr::select(samplename, plaque, well, mouseV2,
+TypeSample, Ncell, Run, SampleBio, Barcode_sharing_mice_N, BCM_LVmerged)) %>%
+  distinct()
+
+Summary_BCM1_perwell %>% head
+```
+```{r}
+#Match well information: For eg, "A1" will be replaced by "A01", "C12" remain unchanged
+
+Summary_BCM1_perwell <- Summary_BCM1_perwell %>%
+  mutate( well = str_replace(well, 
+                            "^([A-Z])(\\d)$", 
+                             "\\10\\2") )
+
+Summary_BCM1_perwell %>% head
+```
+
+
+
+```{r}
+summary_grouped <- Summary_BCM1_perwell %>%
+  
+#Group by plate and well
+  group_by(plaque, well) %>%
+  
+# Build a summary table containing information for all barcodes detected by MiniBulk (aka well)
+  summarise({
+    
+# Aggregate UMI counts by barcode
+    df <- tibble(
+      BCM_LVmerged,
+      n_umi_distinct,
+      Barcode_sharing_mice_N
+    ) %>%
+      group_by(BCM_LVmerged) %>%
+      dplyr::summarise(
+
+        n_umi_distinct = sum(n_umi_distinct),  # Total number of UMIs associated with each barcode
+        Barcode_sharing_mice_N = dplyr::first(Barcode_sharing_mice_N),  # Keep barcode sharing information
+        .groups = "drop"
+      ) %>%
+
+ # Compute the fraction of total UMIs represented by each Clone
+      mutate(
+        fraction = n_umi_distinct / sum(n_umi_distinct)
+      )
+
+    tibble(
+      BCM_LVmerged_list = list(df$BCM_LVmerged),
+      n_umi_list = list(df$n_umi_distinct),
+      sharing_list = list(df$Barcode_sharing_mice_N),
+      fraction_list = list(df$fraction),
+
+      n_barcode = nrow(df), # Number of distinct barcodes detected in the well
+      max_barcode_fraction = max(df$fraction),  # Fraction of UMIs corresponding to the dominant Clone
+      BCM_major = df$BCM_LVmerged[which.max(df$n_umi_distinct)] # Identity of the dominant Clone
+    )
+
+  }, .groups = "drop")
+
+summary_grouped %>% tail; summary_grouped$BCM_LVmerged_list[1]
+```
+Load metadata
+
+```{r}
+meta <- read_excel("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Tables/MetaData_MiniBulk.xlsx")
+head(meta)
+```
+
+Merge with 
+```{r}
+merged_meta <- meta %>%
+  left_join(summary_grouped,
+            by = c( "Plate_Source" = "plaque" ,
+                   "Well_Source" = "well" ))
+
+head(merged_meta, 15)
+```
+
+
+Load data
+
+
+```{r}
+Input_Data= list.dirs(Input_Dir)[-1]
+Input_Data <- Input_Data[grep("*10XlikeMatrix_umi", Input_Data)]
+
+rna.data <- Read10X(data.dir =Input_Data)
+rna_seurat_umi <- CreateSeuratObject(counts = rna.data,
+                             min.cells = 1,
+                             min.features = 100,
+                             project = "mouse_MiniBulk")
+
+rna_seurat_umi@meta.data$SampleName <- colnames(rna_seurat_umi)
+```
+
+
+Merge samples: 
+```{r}
+tmp <- left_join(rna_seurat_umi@meta.data,
+                            merged_meta,
+                 by = c("SampleName" = "SampleName"))
+
+rownames(tmp) <- tmp$SampleName
+
+rna_seurat_umi@meta.data <- tmp
+
+rna_seurat_umi@meta.data$BioSample <- paste0(rna_seurat_umi@meta.data$Mouse, "_", rna_seurat_umi@meta.data$Condition)
+```
+
+
+
+##QC
+
+Samples were retained if they had over 1,000 UMIs. The top 5% of cells with the highest coverage and gene counts were excluded as outliers. Cells with >10% mitochondrial reads and >25% ribosomal reads were also removed. 
+
+
+```{r}
+            x1 = data.frame(nGene = rna_seurat_umi$nCount_RNA)
+            x1$BioSample = rna_seurat_umi@meta.data$BioSample
+            x1$Stage = rna_seurat_umi@meta.data$Stage   
+            colnames(x1) = c("nGene", "BioSample", "Stage")
+
+min.features.thr <- log10(10**5)
+selected_cells <- which(x1$nGene >  10^min.features.thr) %>% length
+selected_cells
+
+p <- ggplot(x1, aes(x = BioSample, y=nGene , fill=BioSample)) + 
+  geom_violin(color = "black", position = position_dodge(width = 0.7)) + 
+  geom_boxplot(position = position_dodge(width = 0.7), width = 0.1, alpha = 0.9, fill = "white")+
+  geom_point(position = position_jitterdodge(jitter.width = 0.1,dodge.width = 0.7),  size = 4)+
+  geom_hline(yintercept = 10**3)+
+ 
+  theme_classic() + 
+  scale_shape_manual(values = c(18, 19))+
+  xlab("log10(Number of RNA+1)") +
+  scale_color_manual(values = brewer.pal(12, "Paired"))+
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))
+
+print(p)
+```
+
+
+```{r}
+
+rna_seurat_umi[["percent.mito"]] <- PercentageFeatureSet(rna_seurat_umi, pattern = "^mt-")
+
+rna_seurat_umi[["percent.ribo"]] <- PercentageFeatureSet(rna_seurat_umi, pattern = "^Rp[sl]")
+
+            x1$Mito = rna_seurat_umi@meta.data$percent.mito
+            x1$Ribo = rna_seurat_umi@meta.data$percent.ribo
+
+
+pmito <- ggplot(x1, aes(x = Mito, y=nGene, fill=BioSample)) + 
+  geom_point(position = position_jitterdodge(jitter.width = 0.1,dodge.width = 0.7),  size = 4)+
+  geom_vline(xintercept = 10)+
+ 
+  theme_classic() + 
+  xlab("Fraction mitochondrial gene (%)") +
+  scale_color_manual(values = brewer.pal(12, "Paired"))+
+  scale_shape_manual(values = c(18, 19))+
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))+
+  scale_x_continuous(limits = c(0, 100))
+
+pRibo <- ggplot(x1, aes(x = Ribo, y=nGene, fill=BioSample)) + 
+  geom_point(position = position_jitterdodge(jitter.width = 0.1,dodge.width = 0.7),  size = 4)+
+  geom_vline(xintercept = 25)+
+ 
+  theme_classic() + 
+  xlab("Fraction Ribosomal gene (%)") +
+  scale_color_manual(values = brewer.pal(12, "Paired"))+
+    scale_shape_manual(values = c(18, 19))+
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))+
+  scale_x_continuous(limits = c(0, 100))
+
+
+pmito+pRibo
+```
+```{r}
+rna_seurat_umi <- subset(rna_seurat_umi,  nCount_RNA > 10**3 & percent.ribo < 25 & percent.mito < 10 )
+```
+
+
+
+
+
+Filtered gene-cell barcode matrices were normalized individually using the "SCTransform" method (ref).
+
+# Pre-tumoral PCA space
+
+```{r}
+#Subset Pre-tumoral minibulk only (remove Tumor samples)
+rna_seurat_umi_el <- subset(rna_seurat_umi, 
+                            CellType == "MixedGFPpos")
+
+rna_seurat_umi_el$BioSample <- paste0(rna_seurat_umi_el$Mouse,
+                                      "_", rna_seurat_umi_el$Gland)
+
+
+#Annotation 
+rna_seurat_umi_el@meta.data <- rna_seurat_umi_el@meta.data %>%
+  mutate(Juxta_Not = case_when(Plate_Source %in% c("LatePlq1", "LatePlq2") & 
+                                 CellType != "Tum" & 
+                                 BioSample !=  c("9341_G4") ~ "Jx",
+                               CellType == "Tum" ~ "Tm",
+                               TRUE ~ "Gl"))
+```
+
+```{r}
+#Normalize & RD
+rna_seurat_umi_el <- NormalizeData(rna_seurat_umi_el)
+rna_seurat_umi_el <- FindVariableFeatures(rna_seurat_umi_el)
+rna_seurat_umi_el <- ScaleData(rna_seurat_umi_el)
+rna_seurat_umi_el <- RunPCA(rna_seurat_umi_el, 
+                            features = VariableFeatures(rna_seurat_umi_el), 
+                            npcs = 50)
+
+```
+
+#Subsampling PCA and projection
+```{r}
+meta <- rna_seurat_umi_el@meta.data # Metadata extraction
+
+# -------------------------------
+# 1. Remove outlier mini-bulk samples
+# -------------------------------
+# These samples are excluded based on known quality or biological issues (number of cells)
+
+id_rm <- which(rna_seurat_umi_el$SampleName %in% c("p1-E15-9826-G4-1c-EarlyPlq3-MiniBulk",                                                  "p1-O11-9891-G4-23c-EarlyPlq2-MiniBulk",                                                   "p1-P11-9873-D3-723c-EarlyPlq2-MiniBulk",                                                    "p1-H05-9341-Gl-100c-LatePlq1-MiniBulk"))
+
+# Keep remaining cells
+cells_keep <- setdiff(colnames(rna_seurat_umi_el),
+                      rna_seurat_umi_el$SampleName[id_rm])
+
+meta_sub <- meta[cells_keep, ]
+
+# -------------------------------
+# 2. Balanced subsampling across mice
+# -------------------------------
+
+# Minimum number of cells per mouse (used for balancing)
+n_min <- median(table(meta_sub$Mouse))
+
+# subsample 
+set.seed(1)
+cells_sub <- c()
+for (i in unique(meta_sub$Mouse)) {
+  
+  # number of cells available for this mouse
+  Sample_i <- nrow(subset(meta_sub, Mouse == i) )
+  
+    # random subsampling per mouse, capped by n_min
+  cells_sub <- c(cells_sub,
+                subset(meta_sub, Mouse == i) %>% rownames()%>%
+                  sample(.,size = min(Sample_i, n_min))
+  )
+}
+
+# Sanity checks
+table(meta_sub[cells_sub, "Mouse"])
+table(meta_sub[cells_sub, "BioSample"])
+
+
+# -------------------------------
+# 3. PCA on balanced subsample
+# -------------------------------
+
+mat_sub <- GetAssayData(rna_seurat_umi_el, slot = "data")[
+  VariableFeatures(rna_seurat_umi_el),
+  cells_sub] %>% t()
+
+
+
+# Centering (store parameters for projection)
+center <- colMeans(mat_sub)
+
+# Scale without variance normalization (preserve gene scale)
+mat_sub_scaled <- scale(mat_sub, center = center, scale = F)#scale_sd)
+
+# PCA computation
+pca <- prcomp(mat_sub_scaled, center = F, scale. = F, rank. = 50)
+
+
+# -------------------------------
+# 4. Projection of all cells onto PCA space
+# -------------------------------
+
+mat_all <- GetAssayData(rna_seurat_umi_el, slot = "data")[
+  VariableFeatures(rna_seurat_umi_el),
+  cells_keep
+] %>% t()
+
+
+# Apply identical centering transformation
+mat_all_scaled <- scale(mat_all, center = center, scale = F)# scale_sd)
+
+
+# Projection onto PCA loadings
+# projection = X * rotation
+emb_all <- mat_all_scaled %*% pca$rotation
+
+
+# -------------------------------
+# 5. Reintegrate excluded cells as NA embeddings
+# -------------------------------
+
+cells_all <- colnames(rna_seurat_umi_el)
+
+emb_full <- matrix(
+  NA,
+  nrow = length(cells_all),
+  ncol = ncol(emb_all)
+)
+
+rownames(emb_full) <- cells_all
+colnames(emb_full) <- colnames(emb_all)
+
+emb_full[rownames(emb_all), ] <- emb_all
+
+
+# -------------------------------
+# 6. Store "balanced" PCA as a Seurat reduction object
+# -------------------------------
+
+rna_seurat_umi_el[["balanced_pca"]] <- CreateDimReducObject(
+  embeddings = emb_full,
+  loadings = pca$rotation,
+  key = "BPC_",
+  assay = DefaultAssay(rna_seurat_umi_el)
+)
+
+# Visualization
+DimPlot(rna_seurat_umi_el, reduction = "balanced_pca", group.by = "BioSample")
+DimPlot(rna_seurat_umi_el, reduction = "balanced_pca", group.by = "Plate_Source")
+FeaturePlot(rna_seurat_umi_el, reduction = "balanced_pca", "CellNumber",max.cutoff = 100)
+
+```
+```{r}
+# -------------------------------
+# 7. Variance explained by PCs
+# -------------------------------
+
+var_explained <- (pca$sdev^2) / sum(pca$sdev^2)
+percent_var <- var_explained * 100
+percent_var[1:10]
+```
+
+
+
+
+
+
+
+
+##Correlation analysis between PCA space and age
+```{r}
+# -------------------------------
+# 1. Avoid pseudo-replication by averaging per biological sample
+# -------------------------------
+
+pca_df_avg <- pca_df %>%
+  group_by(BioSample) %>%
+  summarise(
+    # Average PCA coordinates across cells within each biosample
+     across(starts_with("BPC_"), mean, na.rm = TRUE),
+    Age = mean(Age, na.rm = TRUE), #Age 
+    Juxta_Not = unique(Juxta_Not) # Group identity
+  )
+
+# -------------------------------
+# 2. Pearson correlation between PCs and age
+# -------------------------------
+
+cor_results <- lapply(1:10, function(i) {
+ # pc <- paste0("WPCA_", i)
+   pc <- paste0("BPC_", i)
+  test <- cor.test(pca_df_avg[[pc]], pca_df_avg$Age, method = "pearson")
+  
+  data.frame(
+    PC = pc,
+    r = test$estimate,
+    pval = test$p.value
+  )
+}) %>% bind_rows()
+
+# Multiple testing correction (BH)
+cor_results$padj <- p.adjust(cor_results$pval, method = "BH")
+
+# Significant correlations
+cor_results %>% 
+  filter(padj < 0.05 & abs(r) > 0.4)
+```
+```{r}
+# -------------------------------
+# 3. Scatter plots for each PC vs Age
+# -------------------------------
+
+
+plots <- lapply(1:10, function(i) {
+ # pc <- paste0("WPCA_", i)
+   pc <- paste0("BPC_", i)
+  
+  ggplot(pca_df_avg, aes_string(x = "Age", y = pc, fill = "BioSample")) +
+    geom_point(alpha = 0.6,  size = 2, 
+               aes(shape = Juxta_Not)) +
+    geom_smooth(method = "lm", se = TRUE) +
+      scale_shape_manual(values = c(21, 24))+
+    stat_regline_equation(label.x = min(pca_df_avg$pc),
+                        label.y = max(pca_df_avg$Age)) +
+  stat_cor(label.x = min(pca_df_avg$pc),
+           label.y = max(pca_df_avg$Age) * 0.1,
+           method = "pearson") +
+    ggtitle(paste0(pc, " vs Age")) +
+    theme_classic()+
+    scale_fill_manual(values = sample(colorRampPalette(brewer.pal(8, "Spectral"))(30)))+
+    theme(legend.position = "none")
+})
+
+
+wrap_plots(plots, ncol = 10)
+
+# -------------------------------
+# 3.Global correlation summary plot:
+# -------------------------------
+#Extended Fig4a
+ggplot(cor_results, aes(x = PC, y = r)) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = c(0.5, 0 ,-0.5), linetype = "dashed") +
+  theme_classic() +
+  scale_x_discrete(limits = c(paste0("BPC_", 1:10)))+
+  ylab("Pearson correlation (r)") +
+  ggtitle("Correlation of PCs with Age")
+```
+##F Linear model: definition of pseudotime axis
+
+```{r}
+# -------------------------------
+# 4. Linear regression defining a pseudotime axis from PCA space
+# -------------------------------
+fit <- lm(Age ~ BPC_1 +  BPC_3 #+ BPC_4
+          , data = pca_df)
+
+summary(fit)
+```
+
+
+```{r}
+# -------------------------------
+# 5. Project regression-based pseudotime onto all cells
+# -------------------------------
+cells_all <- colnames(rna_seurat_umi_el)
+fit_full <- matrix(  NA,  nrow = length(cells_all),  ncol = 1)
+rownames(fit_full) <- cells_all
+colnames(fit_full) <- "pseudotime"
+
+
+# Predict pseudotime from PCA-derived model
+fit_full[names(predict(fit)), ] <- predict(fit)
+
+pca_df$pseudotime <- fit_full
+```
+
+
+```{r}
+#Store pseudotime in Seurat object
+rna_seurat_umi_el@meta.data$pseudotime <- fit_full
+```
+
+
+Model coefficients
+```{r}
+#age = β0 + β1*WPC1 + β2*WPC5
+coef(fit)
+```
+
+```{r}
+# Group according to pre-tumoral pseudotime values
+rna_seurat_umi_el@meta.data <- rna_seurat_umi_el@meta.data %>% 
+  mutate(Group_PT = case_when(pseudotime < 2 ~"E1", 
+                              pseudotime > 5.5 ~"L", 
+                              TRUE ~"E2"))
+
+```
+
+
+
+# Dispersion metrics (annotated)
+##Shannon index computation (clonal diversity, by Minibulk)
+
+```{r}
+#Extract PCA coordinates
+pca <- as.data.frame(
+  Embeddings(rna_seurat_umi_el, reduction = "balanced_pca")[, c(1,5)]
+)
+
+pca$BioSample <- rna_seurat_umi_el$BioSample
+
+# Merge PCA coordinates with metadata
+mm_meta <- rna_seurat_umi_el@meta.data
+mm_meta$BioSample = rownames(mm_meta)
+
+meta_plot <- mm_meta |>
+  left_join(pca, by = "BioSample")
+
+# -------------------------------
+# 2. Compute Shannon diversity index per mini-bulk
+# -------------------------------
+# Based on barcode frequency distribution (fraction_list)
+
+meta_plot <- meta_plot %>%
+  rowwise() %>%
+  mutate(
+    shannon_barcode = if(!is.null(fraction_list) && length(fraction_list) > 0) {
+      p <- unlist(fraction_list)
+      p <- p[p > 0] # avoid log(0)
+      -sum(p * log(p)) # Shannon entropy
+    } else {
+      NA_real_
+    }
+  ) %>%  ungroup()
+```
+
+```{r}
+# Shannon vs number of cells per mini-bulk
+ggplot(meta_plot, aes(x = CellNumber, y = shannon_barcode))+
+  geom_jitter(size =3, hape = 21, alpha = 0.5)+
+  scale_x_continuous(limits = c(0, 100))+
+  theme_classic()
+```
+```{r}
+# Shannon vs age
+ggplot(meta_plot, aes(x = Age, y = shannon_barcode))+
+  geom_jitter(size =3, shape = 21, alpha = 0.5)+
+   geom_smooth(method = "lm", se = FALSE, color = "black") +
+  stat_regline_equation(label.x = min(meta_plot$Age),
+                        label.y = max(meta_plot$shannon_barcode)) +
+  stat_cor(label.x = min(meta_plot$Age),
+           label.y = max(meta_plot$shannon_barcode) * 0.9,
+           method = "pearson")+
+  theme_classic()
+```
+
+
+Group comparison of clonal diversity
+```{r}
+ggplot(meta_plot, aes(x = Group_PT, fill = Group_PT, y = shannon_barcode))+
+  geom_boxplot(outliers = F)+
+  geom_point(size =3, alpha = 0.5,
+             position = position_jitter(width = 0.1),
+             aes(shape = Juxta_Not))+
+  theme_classic()+
+  scale_x_discrete(limits = c("E1",  "E2", "L"))+
+  scale_shape_manual(values = c(21, 24))+
+  scale_fill_manual(values = colorRampPalette(brewer.pal(4, "Spectral"))(4)[c(2, 4, 1, 3)])+
+  theme(legend.position = "none")
+
+```
+Statistical testing
+```{r}
+anova_model <- aov(shannon_barcode~Group_PT, data = meta_plot)
+summary(anova_model)
+
+tukey_res <- TukeyHSD(anova_model)
+tukey_res
+```
+
+Store Shannon index in Seurat object
+```{r}
+rna_seurat_umi_el$shannon_barcode_index <- meta_plot$shannon_barcode
+```
+
+
+Relationship with pseudotime
+```{r}
+plot(rna_seurat_umi_el$shannon_barcode_index~rna_seurat_umi_el$pseudotime)
+
+
+data_plot <- data.frame(shannon = rna_seurat_umi_el$shannon_barcode_index,
+                        pseudotime = rna_seurat_umi_el$pseudotime)
+
+ggplot(data_plot, aes(x = pseudotime, y = shannon))+
+  geom_point(shape = 21)+
+  geom_smooth(method = "lm")+
+  theme_classic()
+```
+
+
+##Distance to biological sample centroid (sample dispersion)
+```{r}
+pca_df$Group_PT <- rna_seurat_umi_el$Group_PT
+variance <- rna_seurat_umi_el@reductions$balanced_pca@stdev[c(1, 3)] /100
+
+# -------------------------------
+# 1. PCA-based centroid computation per BioSample
+# -------------------------------
+
+centroids <- pca_df %>%
+  dplyr::group_by(BioSample) %>%
+  dplyr::summarise(across(paste0("BPC_", c(1, 3)), ~ mean(.x, na.rm = TRUE), .names = "c{.col}"))
+head(centroids)
+
+# -------------------------------
+# 2. Euclidean distance to sample centroid
+# -------------------------------
+
+df_dist <- pca_df %>%
+  left_join(centroids, by = c("BioSample")) %>%
+  group_by(BioSample) %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate( dist_to_centroid = sqrt(sum(
+      (dplyr::c_across(paste0("BPC_", c(1, 3))) -
+       dplyr::c_across(paste0("cBPC_", c(1, 3))))^2
+    ))
+  ) %>%
+  ungroup()
+
+
+#Visualization of dispersion 
+base_pal <- c( "grey90","#C0D69F", "#61980E", "grey10")
+extended_pal <- rev(colorRampPalette(base_pal)(29))
+
+ggboxplot <- ggplot(subset(df_dist, is.na(BioSample)==F),
+       aes(x = Group_PT, y = dist_to_centroid)) +
+  geom_boxplot(outliers = F) +
+  geom_jitter(aes(fill = Group_PT, shape = Juxta_Not), width = 0.2, alpha = 0.5, size = 1) +
+  theme_classic(base_size = 14) +
+  labs(y = "Distance to BioSample-centroid, PC1 & PC3", x = "") +
+ scale_fill_manual(values = extended_pal) +  
+  theme(legend.position = "none")+
+  scale_shape_manual(values = c(21, 24) )+
+  scale_fill_manual(values = colorRampPalette(brewer.pal(4, "Spectral"))(4)[c(2, 4, 1, 3)])
+
+
+ggboxplot
+```
+
+```{r}
+anova_model <- aov(dist_to_centroid~Group_PT, 
+                   data = subset(df_dist, is.na(BioSample)==F))
+summary(anova_model)
+
+tukey_res <- TukeyHSD(anova_model)
+tukey_res
+```
+
+Add to metadata
+```{r}
+rna_seurat_umi_el$Distance_to_Biosample_Centroid <- df_dist$dist_to_centroid
+```
+
+
+#Identification of pathways associated with pseudotime
+
+1. Loading gene signatures and preparing pathway sets
+```{r}
+# -------------------------------
+# Load curated mammary gland gene signatures
+# -------------------------------
+
+Signature_ID_CreN_10x <- read.delim("C:/Users/Marthe Laisne/Desktop/BI_references_signatures_annotations/Mammarygland_Signatures_Custom/SignatureCreN_scRNA10x_Epithelial_poles.txt")
+
+LAlv_Chen2021  <- read.delim("C:/Users/Marthe Laisne/Desktop/BI_references_signatures_annotations/Mammarygland_Signatures_cellTypes/LAlv_Chen2021.txt")
+LAlv_Chen2021$Type <- rep("Alv", nrow(LAlv_Chen2021))
+colnames(LAlv_Chen2021) <- c("Gene", "Type")
+LAlv_Chen2021 <- LAlv_Chen2021[, c(2,1)]
+LAlv_Chen2021 <- rbind(LAlv_Chen2021, data.frame(Type = "Alv", Gene = "Spp1"))
+
+Signature_ID_CreN_10x <- rbind(Signature_ID_CreN_10x,
+                               LAlv_Chen2021)
+
+# Group genes into signature lists
+sig_list <- Signature_ID_CreN_10x %>%
+  group_by(Type) %>%
+  summarise(genes = list(unique(Gene))) %>%
+  deframe()
+
+# Restrict to genes present in the dataset
+sig_list <- lapply(sig_list, function(g) {
+  intersect(g, rownames(rna_seurat_umi_el))
+})
+
+```
+
+2. Compute module scores per signature
+```{r}
+# -------------------------------
+# Add Seurat module scores for each gene set
+# -------------------------------
+
+rna_seurat_umi_el <- AddModuleScore(
+  object = rna_seurat_umi_el,
+  features = sig_list,
+  name = names(sig_list)
+)
+
+# Rename score columns for clarity
+new_names <- paste0(names(sig_list), "_Score")
+
+colnames(rna_seurat_umi_el@meta.data)[(ncol(rna_seurat_umi_el@meta.data)-3):ncol(rna_seurat_umi_el@meta.data)] <- new_names
+```
+
+3. Linking pseudotime to PCA loadings (pathway ranking strategy)
+```{r}
+# Extract PCA loadings from balanced PCA
+loadings <- Loadings(rna_seurat_umi_el, reduction = "balanced_pca")
+
+# Pseudotime
+pt_scores <- rna_seurat_umi_el$pseudotime
+names(pt_scores) <- colnames(rna_seurat_umi_el)
+
+# Linear model coefficients defining pseudotime axis
+pt_loadings <- coefficients(fit)[1] + 
+  coefficients(fit)[2]*loadings[,1] +
+  coefficients(fit)[3] *loadings[,3] 
+pt_loadings <- sort(pt_loadings, decreasing = TRUE)
+
+```
+
+4. Gene set enrichment analysis (FGSEA)
+```{r}
+library(msigdbr)
+library(fgsea)
+
+# Hallmark gene sets (Mouse)
+hallmark <- msigdbr(species = "Mus musculus", category = "H")
+
+pathways_hallmark <- hallmark %>% 
+  split(x = .$gene_symbol, f = .$gs_name) 
+
+# Combine curated signatures + hallmark sets
+pathways <- c(pathways_hallmark, sig_list)
+
+# Run fgsea using ranked gene list
+fgsea_res <- fgsea(
+  pathways = pathways,
+  stats = pt_loadings
+)
+
+# Filter significant pathways
+fgsea_sig_pt <- fgsea_res |> 
+  dplyr::filter(padj < 0.01) |> 
+  arrange(desc(NES))
+
+fgsea_sig_pt
+fgsea_sig_pt[, c("pathway","padj", "NES")]
+
+```
+
+5. Export results
+```{r}
+write.table(fgsea_sig_pt[, c("pathway","padj", "NES")], paste0(Output_Dir, "fgsea_sig_pt.txt"), quote = F, sep = "\t")
+```
+
+
+```{r}
+library(openxlsx)
+
+gsea_export <- copy(fgsea_sig_pt)
+
+gsea_export[, leadingEdge := sapply(leadingEdge, paste, collapse = ";")]
+
+write.xlsx(gsea_export, "C:/Users/Marthe Laisne/Desktop/FlashSeq_MultiOneCell/Results/Fig5_MiniBulkRNA/gsea_sig_pt.xlsx")
+```
+
+6. Compute module scores for significant pathways
+```{r}
+sig_pathways <- fgsea_sig_pt$pathway 
+
+for (pw in sig_pathways) {
+  genes <- pathways[[pw]]
+  
+  rna_seurat_umi_el <- AddModuleScore(
+    rna_seurat_umi_el,
+    features = list(genes),
+    name = pw
+  )
+}
+```
+
+## Pathway score heatmaps
+
+
+
+```{r}
+#Extract score
+meta <- rna_seurat_umi_el@meta.data
+colnames(meta) <- gsub("1$", "", colnames(meta))
+
+meta <- meta %>% 
+  mutate(Group_PT = case_when(pseudotime < 2 ~"E1", pseudotime > 5.5 ~"L", TRUE ~"E2"))
+
+score_mat <- meta |>
+  dplyr::select(dplyr::any_of(c(sig_pathways,
+                                "LP_Score", "Alv_Score", "Basal_Score", "Luminal H-S_Score")))
+
+
+
+score_mat <- score_mat[rownames(meta), ]
+
+
+#Annot tumor bearing
+meta$Tm_Bearing <- meta$Juxta_Not
+```
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+# palette Age
+age_col_fun <- colorRamp2(
+  seq(min(meta$Age), max(meta$Age), length.out = 4),
+  c("white", "#C0D69F", "#61980E", "grey10"))
+
+pseudoT_col_fun <- colorRamp2(
+  seq(min(meta$pseudotime, na.rm = T)+1, max(meta$pseudotime, na.rm = T)+1, length.out = 5),
+  c("white", "#9f97c8", "#514495", "#231e47", "grey10"))
+
+Clusters_col <- setNames(  colorRampPalette(brewer.pal(4, "Spectral"))(4)[1:3],
+  levels(factor(meta$Group_PT)))
+  
+
+# palette Shannon - distance
+shannon_col_fun <- colorRamp2(
+  seq(min(meta$shannon_barcode_index, na.rm = T), max(meta$shannon_barcode_index, na.rm = T), length.out = 4),
+  c("white", "grey70", "grey30", "grey10"))
+
+
+
+#  Tm_Bearing (facteur)
+tm_levels <- unique(meta$Tm_Bearing)
+
+tm_cols <- setNames(  c( "grey10", "grey50", "grey95")[seq_along(tm_levels)],   tm_levels)
+
+# --- Mouse (facteur)
+mouse_levels <- unique(meta$Mouse)
+
+mouse_cols <- setNames(  colorRampPalette(brewer.pal(8, "Spectral"))(length(mouse_levels)),
+  mouse_levels)
+
+# --- Annotation heatmap
+age_anno <- HeatmapAnnotation(
+  pseudoT = meta$pseudotime,
+  Shannon = meta$shannon_barcode_index,
+  Cluster = meta$Group_PT,
+  Age = meta$Age,
+  Tm_Bearing = meta$Tm_Bearing,
+ 
+  Mouse = as.character(meta$Mouse),
+  
+ 
+  col = list(
+    Shannon = shannon_col_fun,
+    Cluster = Clusters_col,
+    Tm_Bearing = tm_cols,
+    Mouse = mouse_cols,
+    pseudoT = pseudoT_col_fun,
+    Age = age_col_fun),
+  
+  annotation_name_side = "left")
+
+
+
+############# Heatmap
+heatmap_palette <- c( rev( c("grey99","#E9F2FC", "#C1DAF6",  "#99C1F0", "#71A9EA", "#4991E4", "#3283E0", "#1B63B6", "#154E8E", "#0F3866") )
+  ,"grey99", "#FCE9F2", "#F6C1DA", "#F099C1", "#EA71A9",  "#E44991", "#E03283", "#B61B63", "#8E154E",  "#660F38")
+
+heatmap_col_fun <- colorRamp2(
+  seq(-2, 2, length.out = length(heatmap_palette)),
+  heatmap_palette)
+
+
+Heatmap(
+  t(scale(score_mat[,  ], center = TRUE, scale = TRUE)),
+  name = "Pathway score",
+  top_annotation = age_anno,
+  col = heatmap_col_fun,
+  column_order = order(meta$pseudotime), # Order according to pseudot
+  cluster_columns = F,
+  cluster_rows = TRUE,
+  clustering_distance_rows = "euclidean",
+  clustering_method_rows = "ward.D2",
+  show_column_names = FALSE,
+  row_names_gp = gpar(fontsize = 8) )
+
+```
+```{r}
+pdf(paste0(Output_Dir, "/Heatmap_Noscale_Mouse_BalancedPC.pdf")  , height =4, width = 10, onefile = T)
+Heatmap(
+  t(scale(score_mat[is.na(meta$pseudotime)==F,  ], center = TRUE, scale = TRUE)),
+  name = "Pathway score",
+  top_annotation = age_anno[is.na(meta$pseudotime)==F],
+  col = heatmap_col_fun,
+  cluster_columns = T,
+    clustering_distance_columns  = "euclidean",
+  clustering_method_columns  = "ward.D2",
+  cluster_rows = TRUE,
+  clustering_distance_rows = "euclidean",
+  clustering_method_rows = "ward.D2",
+  show_column_names = FALSE,
+  row_names_gp = gpar(fontsize = 8) )
+
+Heatmap(
+  t(scale(score_mat[ is.na(meta$pseudotime)==F,], center = TRUE, scale = TRUE)),
+  name = "Pathway score",
+  top_annotation = age_anno[is.na(meta$pseudotime)==F],
+  col = heatmap_col_fun,
+  column_order = order(meta$pseudotime[is.na(meta$pseudotime)==F]), # Order according to pseudot
+  cluster_columns = F,
+  cluster_rows = TRUE,
+  clustering_distance_rows = "euclidean",
+  clustering_method_rows = "ward.D2",
+  show_column_names = FALSE,
+  row_names_gp = gpar(fontsize = 8) )
+
+
+dev.off()
+
+```
+
+# Identification of differentially expressed genes
+
+
+```{r}
+#-----------------------------
+# 1. Define comparisons
+#-----------------------------
+comparisons <- list(
+  list(name = "Late_vs_(E1+E2)", ident.1 = "L",  ident.2 = c("E1", "E2"), group = "Group_PT"),
+  list(name = "E2_vs_E1",      ident.1 = "E2", ident.2 = "E1",         group = "Group_PT"),
+  list(name = "Late_vs_E2",    ident.1 = "L",  ident.2 = "E2",        group = "Group_PT")
+)
+
+#-----------------------------
+# 2. Loop DEG analysis
+#-----------------------------
+deg_results <- list()
+
+for (cmp in comparisons) {
+
+  message("Running: ", cmp$name)
+
+  deg <- FindMarkers(
+    object = rna_seurat_umi_el,
+    ident.1 = cmp$ident.1,
+    ident.2 = cmp$ident.2,
+    group.by = cmp$group,
+    logfc.threshold = 0,
+    min.pct = 0.1,
+    test.use = "wilcox"
+  )
+
+  deg$gene <- rownames(deg)
+
+  deg <- deg %>%
+    mutate(
+      comparison = cmp$name,
+      signif = p_val_adj < 0.05,
+      FC = case_when(
+        signif & avg_log2FC > 0 ~ "UP",
+        signif & avg_log2FC < 0 ~ "DW",
+        TRUE ~ "NS"
+      )
+    )
+
+  deg_results[[cmp$name]] <- deg
+
+  #-----------------------------
+  # Export tables
+  #-----------------------------
+  write.csv(
+    deg,
+    file.path(Output_Dir, paste0("DEG_", cmp$name, ".csv")),
+    row.names = FALSE
+  )
+
+  write.csv(
+    deg %>% filter(p_val_adj < 0.05),
+    file.path(Output_Dir, paste0("DEG_", cmp$name, "_sig.csv")),
+    row.names = FALSE
+  )
+
+  #-----------------------------
+  # Volcano plot (minimal)
+  #-----------------------------
+  p <- ggplot(deg, aes(avg_log2FC, -log10(p_val_adj))) +
+    geom_point(aes(color = signif), alpha = 0.6) +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+    theme_classic() +
+    labs(title = cmp$name)
+  
+  print(p)
+
+  ggsave(
+    file.path(Output_Dir, paste0("Volcano_", cmp$name, ".pdf")),
+    p, width = 4, height = 4
+  )
+}
+
+#-----------------------------
+# 3. Optional: merged table
+#-----------------------------
+deg_merged <- Reduce(function(x, y) full_join(x, y, by = "gene"), deg_results)
+```
+
+#MiniBulk Scoring of significant pathways
+
+```{r}
+# --------------------------------------------------------------
+# UCell scoring function (Yuna's implementation)
+# --------------------------------------------------------------
+
+
+UCell_scores_per_cell <- function(raw_counts, sig) {
+     # Keep only genes present in the dataset
+    sig_genes <- dplyr::intersect(unique(unlist(sig)), rownames(raw_counts)) # restrict to genes found in matrix
+    sig <- lapply(sig, function(x) dplyr::intersect(x, sig_genes))
+    # Compute Ucell scores
+    scores_ucell <- as.data.frame(UCell::ScoreSignatures_UCell(raw_counts, features = sig))
+    return(scores_ucell)
+}
+
+
+# Normalization
+rna_seurat_umi_el <- NormalizeData(rna_seurat_umi_el, 
+                            normalization.method = "LogNormalize",
+                            scale.factor = 10000)
+
+ucell_mat_MiniBulk <- matrix(nrow = dim(rna_seurat_umi_el)[2])
+
+# Score pathway signatures (excluding selected cell-state programs)
+for (pw in sig_pathways[!(sig_pathways %in% c("LP", "Basal", "Luminal H-S"))]) {
+  genes <- pathways[[pw]]
+  ucell_mat_MiniBulk <- cbind(ucell_mat_MiniBulk,
+                        UCell_scores_per_cell(GetAssayData(rna_seurat_umi_el, slot = "data"), 
+                                      sig = list(genes))
+  )
+
+}
+# Format matrix
+ucell_mat_MiniBulk <- ucell_mat_MiniBulk[,2:ncol(ucell_mat_MiniBulk)]
+colnames(ucell_mat_MiniBulk) <- (sig_pathways[!(sig_pathways %in% c("LP", "Basal", "Luminal H-S"))]
+)
+
+ucell_mat_MiniBulk %>% head
+```
+
+
+```{r}
+# UMAP projection and metadata integration
+dat <- ucell_mat_MiniBulk
+
+dat$BPC1 <-Embeddings(rna_seurat_umi_el , "balanced_pca")[, 1]
+dat$BPC3 <- Embeddings(rna_seurat_umi_el , "balanced_pca")[, 3]
+dat$pseudotime <- rna_seurat_umi_el$pseudotime
+
+head(dat)
+```
+
+
+
+
+## Pathways assignment (global reference)
+Binarization and state calling:
+  1. Scores are centered and scaled across the cohort
+  2. A threshold is defined per pathway (mean + SD)
+  3. Samples  are assigned to active/inactive states
+  4. Maximum scoring pathway defines dominant state per Sample
+```{r}
+meta <- rna_seurat_umi_el@meta.data
+meta <- meta[, !(colnames(meta) %in% c(sig_pathways, "state_max", "state_max_relev"))]
+metadata_cells <- meta
+
+nb_sds <- 1
+
+ucell_mat_MiniBulk_global <- ucell_mat_MiniBulk
+df_MiniBulk <- meta
+
+
+ucell_mat_MiniBulk_global <- ucell_mat_MiniBulk_global[ rownames(df_MiniBulk), ] %>% t
+
+# --------------------------------------------------------------
+#1. Scores are centered and scaled across the cohort
+# --------------------------------------------------------------
+
+ucell_mat_MiniBulk <- ucell_mat_MiniBulk_global 
+ucell_mat_MiniBulk_global <- t(scale(t(ucell_mat_MiniBulk_global), scale = T))
+ucell_mat_MiniBulk_global[is.nan(ucell_mat_MiniBulk_global)] <- 0
+
+# --------------------------------------------------------------
+#2. A threshold is defined per pathway (mean + SD)
+# --------------------------------------------------------------
+
+thr_vect <- apply(ucell_mat_MiniBulk[,  drop = FALSE], 1, function(x) {
+    tmp <- x[x > 0]
+    if (length(tmp) == 0) return(0)  # sécurité
+    return(mean(tmp) + nb_sds * sd(tmp))
+})
+
+ucell_mat_global_MiniBulk_binary <- sweep(ucell_mat_MiniBulk, 1, thr_vect, "-")
+
+{
+    list_mat <- list()
+    list_attrib <- list()
+    list_attrib_max <- list()
+    cell_id <- c()
+
+    for (sample_id in unique(df_MiniBulk$BioSample)) {
+
+        # subset state activity matrix for the right sample
+        idx <- which(df_MiniBulk$BioSample == sample_id)
+        ucell_mat_sub <- ucell_mat_global_MiniBulk_binary[, idx, drop = FALSE]
+
+        # --- Correction : If only one sample, force matrix  ---
+        if (is.null(dim(ucell_mat_sub))) {
+            ucell_mat_sub <- matrix(ucell_mat_sub, ncol = 1)
+            colnames(ucell_mat_sub) <- colnames(ucell_mat_global_MiniBulk_binary)[idx]
+            rownames(ucell_mat_sub) <- rownames(ucell_mat_global_MiniBulk_binary)
+        }
+
+        # binary attribution
+        thr <- 0
+        tmp_attrib <- apply(ucell_mat_sub, 1, function(x) x >= thr)
+        list_attrib[[sample_id]] <- tmp_attrib
+
+        cell_id <- c(cell_id, colnames(ucell_mat_sub))
+
+        # save processed state matrix by sample
+        list_mat[[sample_id]] <- ucell_mat_global_MiniBulk_binary[, idx, drop = FALSE]
+
+        # maximum attribution
+        ucell_mat_sub2 <- ucell_mat_global_MiniBulk_binary[, idx, drop = FALSE]
+
+        if (ncol(ucell_mat_sub2) == 1) {
+            # --- 1 sample ---
+            x <- ucell_mat_sub2[, 1]
+            tmp_max <- max(x, na.rm = TRUE)
+            if (is.finite(tmp_max) && tmp_max > thr) {
+                tmp <- names(which.max(x, na.rm = TRUE))[1]
+            } else {
+                tmp <- "Unknown"
+            }
+            tmp_attrib2 <- setNames(tmp, colnames(ucell_mat_sub2))
+
+        } else {
+            # --- >1 sample ---
+            tmp_attrib2 <- apply(ucell_mat_sub2, 2, function(x) {
+                tmp_max <- max(x, na.rm = TRUE)
+                if (is.finite(tmp_max) && tmp_max > thr) {
+                    tmp <- rownames(ucell_mat_sub2)[which.max(x)]
+                    tmp[1]
+                } else {
+                    "Unknown"
+                }
+            })
+        }
+
+        list_attrib_max[[sample_id]] <- tmp_attrib2
+    }
+
+    df_attrib <- do.call(rbind, list_attrib)
+    rownames(df_attrib) <- cell_id
+    df_attrib <- df_attrib[colnames(ucell_mat_MiniBulk_global), ]
+
+    vect_attrib <- do.call(c, list_attrib_max)
+    names(vect_attrib) <- cell_id
+    vect_attrib <- vect_attrib[colnames(ucell_mat_MiniBulk_global)]
+}
+
+df_MiniBulk <- cbind(df_MiniBulk, df_attrib)
+df_MiniBulk$state_max <- vect_attrib
+
+head(df_MiniBulk)
+```
+
+```{r}
+dim(df_MiniBulk) ; dim(rna_seurat_umi_el)
+```
+
+
+# ######### SAVE & RELOAD ######### 
+```{r}
+qs::qsave(rna_seurat_umi_el, file = paste0(Output_Dir, "rna_seurat_umi_el.qs") )
+qs::qsave(rna_seurat_umi, file = paste0(Output_Dir, "rna_seurat_umi.qs") )
+
+
+#PCA parameters
+qs::qsave( VariableFeatures(rna_seurat_umi_el), file = paste0(Output_Dir, "features_PCA_MiniBulk.qs") )
+qs::qsave(  Loadings(rna_seurat_umi_el[["balanced_pca"]])[ VariableFeatures(rna_seurat_umi_el), ], 
+            file = paste0(Output_Dir, "loading_PCA_MiniBulk.qs") )
+qs::qsave( center,  file = paste0(Output_Dir, "centers_PCA_MiniBulk.qs") )
+
+
+#Pathways assignment
+qs::qsave(df_MiniBulk, file = paste0(Output_Dir, "Pathways_MiniBulk.qs") )
+qs::qsave( pathways,  file = paste0(Output_Dir, "pathways.qs") )
+qs::qsave( sig_pathways,  file = paste0(Output_Dir, "sig_pathways.qs") )
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

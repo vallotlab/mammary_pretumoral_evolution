@@ -1,0 +1,1374 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+#Intro
+
+To evaluate the relationship between, respectively, clone poly-functionnality, intra-clonal transcriptional heterogeneity, or cell fate diversification and the probability of barcode generation (Pgen), clone-level number of FPs, distances to centroid and cell fate transition score were integrated with Pgen values derived from the IGOR pipeline. Analyses were restricted to clones with available Pgen estimates. 
+We then assessed how these metrics varied as a function of Pgen thresholds. A series of decreasing Pgen cutoffs (10⁰ to 10⁻⁷ in logarithmic steps) was applied, and for each threshold, clones with Pgen below the cutoff were retained. Within each subset, we summarized the median score for each of these metrics, stratified by either clone size or mouse age. 
+
+
+##Librairies
+```{r}
+library(rstatix)
+library(ggpubr)
+library(purrr)
+
+library(Signac) ; library(Seurat) ; library(ggplot2)
+
+library(mgcv)
+library(entropy)
+
+library(data.table)
+library(tidyverse)
+library(ggraph)
+library(dplyr)
+library(readxl)
+library(ggrepel)
+```
+
+
+##Data 
+
+```{r}
+Res_dir <- "C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/sc_DRAG_Analyses"
+
+```
+
+
+
+```{r}
+seurat_rna <- qs::qread(file.path("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Data/seurat_rna_step7_new.qs"))
+
+
+seurat <- qs::qread(file.path("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Data/seurat_step5_new.qs"))
+```
+
+##Pre-process data Pre-tumoral set
+Subset: only CreP GFP+ pre-tumoral cells
+```{r}
+seu <- subset(seurat_rna, Group %in% c( "CreN", "Rosa"), invert = T)
+
+
+seuEpi <- subset(seurat, Group %in% c( "CreN", "Rosa"), invert = T)
+```
+
+```{r}
+#Normalize & RD
+seu <- NormalizeData(seu)
+seu <- FindVariableFeatures(seu)
+seu <- ScaleData(seu)
+seu <- RunPCA(seu, 
+              features = VariableFeatures(seu), 
+              npcs = 50)
+```
+
+
+Epigenome:
+```{r}
+DefaultAssay(seuEpi) <- "bin_50k_h3k4me1"
+
+
+
+
+DefaultAssay(seuEpi) <- "bin_50k_h3k27me3"
+
+#Normalize & RD
+seuEpi <- RunTFIDF(seuEpi)
+seuEpi <- FindTopFeatures(seuEpi)
+seuEpi <- RunSVD(seuEpi)
+seuEpi <- RunUMAP(seuEpi, reduction = 'lsi',  dims = 2:30)
+```
+
+
+## Define clone size categories 
+
+```{r}
+library(dplyr)
+
+# Create a unique sample identifier combining mouse and gland IDs
+seu@meta.data$SampleBio <- paste0(seu@meta.data$MouseNumber, "_", seu@meta.data$WhichGland )
+
+
+# Compute clone size and relative abundance within each sample
+meta <- seu@meta.data %>%
+  as.data.frame() %>%
+  dplyr::filter(!is.na(Barcode)) %>%                              #  retain barcoded cells only
+  dplyr::group_by(SampleBio) %>%
+  dplyr::mutate(TotalCells = n()) %>%                             # total number of barcoded cells per sample
+  dplyr::group_by(SampleBio, Barcode) %>%
+  dplyr::mutate(CloneSize = n()) %>%                              # number of cells per clone
+  dplyr::ungroup() %>%
+  dplyr::mutate(PercentClone = 100 * CloneSize / TotalCells)      # normalized clone abundance
+
+# Inspect clone size distribution
+meta %>% 
+  dplyr::select(CloneSize, SampleBio) %>% 
+  distinct %>% 
+  arrange(CloneSize)
+
+# Merge clone-level information back into Seurat metadata
+meta2 <- data.frame(seu@meta.data )
+head(meta2)
+meta2 <- meta2 %>% 
+  dplyr::left_join(meta %>% dplyr::select(SampleBio, Barcode, CloneSize, TotalCells, PercentClone),
+                           by = c("Barcode"),multiple = "first")
+head(meta2)
+rownames(meta2) <- rownames(seu@meta.data )
+
+seu@meta.data <- meta2
+
+# Retain normalized clone abundance only for monoclonal glands
+seu@meta.data <- seu@meta.data %>% 
+  mutate(BCM_PercentClone_MonoGl = case_when(SampleBio.x %in% 
+                                               c("8964_G4", "8718_D2-3", "8415_G2-3") ~ PercentClone,
+                                             TRUE ~ NA))
+
+# Classify clones according to their relative abundance
+seu@meta.data <- seu@meta.data %>%
+  mutate(ExpandedClone = case_when(SampleBio.x %in% c("8964_G4", "8718_D2-3", "8415_G2-3") & 
+                                     PercentClone >= 10 ~"Expanded",
+                                   SampleBio.x %in% c("8964_G4", "8718_D2-3", "8415_G2-3") & 
+                                     PercentClone < 2 ~"Small",
+                                   SampleBio.x %in% c("8964_G4", "8718_D2-3", "8415_G2-3") & 
+                                     PercentClone < 10 &
+                                     PercentClone >= 2 ~"Int",
+                                   TRUE ~ NA))
+
+table(seu@meta.data$ExpandedClone)
+```
+
+
+
+
+# Clone expansion and pseudotime
+
+
+```{r}
+plot_df <- seu@meta.data %>%
+  filter(!is.na(Barcode),
+         !is.na(pseudotime),
+         !is.na(CloneSize)) %>%
+  group_by(Barcode) %>%
+  summarise(
+    pseudotime = median(pseudotime),
+    CloneSize  = dplyr::first(CloneSize),      
+    ExpandedClone = dplyr::first(ExpandedClone),
+    n_cells = n(),
+    .groups = "drop"
+  )
+
+ggplot(plot_df,
+       aes(x = pseudotime,
+           y = (CloneSize))) +
+  geom_point(aes( colour = ExpandedClone), size = 2.5, alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE, colour = "black") +
+  stat_regline_equation(
+    aes(label = paste(..rr.label.., sep = "~~~~")),
+    label.x.npc = "left",
+    label.y.npc = "top",
+    colour = "black"
+  ) +
+  theme_classic() +
+  labs(
+    x = "Mean clone pseudotime",
+    y = "Clone size",
+    colour = "Expanded clone"
+  )
+```
+
+
+#Clone-level transcriptional heterogeneity:
+
+Compute distance to clone centroid in PCA space
+
+```{r}
+N_PC <- 10 # Number of principal components used
+
+# Extract PCA embeddings
+pcs <- Embeddings(seu,
+                  reduction = "pca")[,1:N_PC] %>% as.data.frame()
+
+# Build cell-level data frame
+dt <- data.frame(Clone =seu$Barcode,
+                       Expand =seu$ExpandedClone,
+                       Sample = seu$SampleBio.x,
+                       Group = seu$Group) %>%
+  cbind(pcs)
+
+head(dt)
+
+
+# --------------------------------------------------------------
+# Compute clone centroids in PCA space
+# --------------------------------------------------------------
+centroids <- dt %>%
+  dplyr::group_by(Clone) %>%
+  dplyr::summarise(across(paste0("PC_", 1:N_PC), ~ mean(.x, na.rm = TRUE), .names = "c{.col}"))
+head(centroids)
+
+# Add centroid coordinates to each cell
+df_dist <- dt %>%
+  left_join(centroids, by = c("Clone"))
+
+
+
+# --------------------------------------------------------------
+# Compute Euclidean distance between each cell and the centroid of its corresponding clone
+# --------------------------------------------------------------
+df_dist <- df_dist %>%
+  dplyr::add_count(Clone, name = "n_cells") %>%  
+  dplyr::filter(n_cells >= 2) %>%          # retain multicellular clones only
+  group_by(Clone) %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate( dist_to_centroid = sqrt(sum(
+      (dplyr::c_across(starts_with("PC_")) -
+       dplyr::c_across(starts_with("cPC_")))^2
+    ))
+  ) %>%
+  ungroup()
+
+
+# --------------------------------------------------------------
+# Export table
+# --------------------------------------------------------------
+df_dist %>% write.table(., paste0(Res_dir, "/RNADistCentroid.txt"),
+                              quote = F, sep = "\t", row.names = F)
+```
+
+
+
+```{r}
+# --------------------------------------------------------------
+# Compute clone-level summary statistics
+# --------------------------------------------------------------
+
+df_clone_dist <- df_dist %>%
+  group_by(Clone) %>%
+  summarise(
+    mean_dist = mean(dist_to_centroid, na.rm = TRUE),
+    median_dist = median(dist_to_centroid, na.rm = TRUE),
+    n_cells = dplyr::first(n_cells),
+    ExpandedClone = dplyr::first(Expand),
+    .groups = "drop"
+  )
+
+
+# Add Pgen estimates
+df_clone_dist <- df_clone_dist %>%
+  left_join(seurat_rna@meta.data[, c("Barcode", "Pgen")] , by = c("Clone" = "Barcode")) %>%
+  distinct()
+
+df_dist <- df_dist %>%
+  left_join(seurat_rna@meta.data[, c("Barcode", "Pgen")] , by = c("Clone" = "Barcode")) %>%
+  distinct()
+
+
+head(df_clone_dist)
+```
+
+Evaluate the effect of increasingly stringent Pgen filtering
+```{r}
+# --------------------------------------------------------------
+# Define a series of decreasing Pgen thresholds
+# --------------------------------------------------------------
+thresholds <- 10^seq(0, -7, by = -0.5)
+thresholds
+```
+
+```{r}
+# --------------------------------------------------------------
+# For each threshold, retain clones with lower Pgen values
+# and compute transcriptional heterogeneity statistics
+# --------------------------------------------------------------
+
+res_pgen_dist <- map_dfr(thresholds, function(thr){
+
+  tmp <- df_clone_dist %>%
+    filter(Pgen <= thr)
+
+  tmp %>%
+    group_by(ExpandedClone) %>%
+    summarise(
+      threshold = thr,
+      n_clones = n(),
+      mean_dist = mean(mean_dist, na.rm = TRUE),
+      median_dist = median(mean_dist, na.rm = TRUE),
+      sem = sd(mean_dist, na.rm = TRUE)/sqrt(n()),
+      .groups = "drop"
+    )
+})
+
+ggplot(subset(res_pgen_dist, is.na(ExpandedClone )==F), 
+       aes(x = -log10(threshold),  y = median_dist,   colour = ExpandedClone)) +
+  geom_line(size = 1) +
+  theme_classic() +
+   geom_text(aes(label = n_clones),
+    vjust = -1,    size = 3,    show.legend = FALSE  )+
+  scale_color_manual(values = c("#d0e0ea","#4384ac", "#0a334c") %>%rev)+
+  labs(x = "Maximum Pgen retained (-log10)",
+       y = "Mean distance to centroid")
+# --------------------------------------------------------------
+# For each threshold, AOV
+# --------------------------------------------------------------
+stats <- purrr::map_dfr(thresholds[1:12], function(thr){
+  dat <- df_dist %>%
+    filter(  Pgen <= thr , 
+              is.na(Expand)==F)
+
+  fit <- aov(dist_to_centroid  ~ Expand, data = dat)
+
+  broom::tidy(fit) %>%
+    filter(term == "Expand") %>%
+    transmute(
+      Thr = thr,
+      logThr = -log10(thr),
+      p = p.value
+    )
+})
+
+stats <- stats %>%
+  mutate(
+    y.position = max(res_pgen_dist$median_dist, na.rm = TRUE) * 1.05,
+    label = paste0(signif(p, 2))
+  )
+stats
+
+# --------------------------------------------------------------
+# Export table
+# --------------------------------------------------------------
+res_pgen_dist %>% write.table(., paste0(Res_dir, "/RNADistCentroid_Pgen.txt"),
+                              quote = F, sep = "\t", row.names = F)
+
+```
+
+
+
+
+
+#Clone-level epigenetic heterogeneity:
+
+> distance to clone centroid in chromatin space
+ 
+Clone-level epigenetic heterogeneity was quantified as the Euclidean distance between individual cells and the centroid of their corresponding clone in latent semantic indexing (LSI) space. Analyses were performed independently for H3K4me1 and H3K27me3 CUT&Tag datasets.
+
+Only multicellular clones (≥ 2 cells) were considered. Clone expansion categories were transferred from matched transcriptomic profiles using CellID_RNA identifiers.
+
+## H3K4me1 dataset
+```{r}
+DefaultAssay(seuEpi) <- "bin_50k_h3k4me1"
+#Normalize & RD
+seuEpi <- RunTFIDF(seuEpi)
+seuEpi <- FindTopFeatures(seuEpi)
+seuEpi <- RunSVD(seuEpi)
+seuEpi <- RunUMAP(seuEpi, reduction = 'lsi',  dims = 2:30)
+
+# Number of LSI dimensions used
+N_PC <- 11
+
+# Extract LSI embeddings (excluding the first component)
+pcs <- Embeddings(seuEpi,
+                  reduction = "lsi")[,2:N_PC] %>% as.data.frame()
+
+# Create cell-level metadata table
+dt <- data.frame(Clone =seuEpi@meta.data$LineageBarcode[which(seuEpi@meta.data$mark == "h3k4me1" )],
+                 BC_RNA = seuEpi@meta.data$BC_RNA[which(seuEpi@meta.data$mark == "h3k4me1" )],
+                       Sample = seuEpi@meta.data$SampleBio[which(seuEpi@meta.data$mark == "h3k4me1" )],
+                       Group = seuEpi@meta.data$Group[which(seuEpi@meta.data$mark == "h3k4me1" )]) %>%
+  cbind(pcs)
+
+# --------------------------------------------------------------
+# Compute clone centroids in LSI space
+# --------------------------------------------------------------
+centroids <- dt %>%
+  dplyr::group_by(Clone) %>%
+  dplyr::summarise(across(paste0("LSI_", 2:N_PC), ~ mean(.x, na.rm = TRUE), .names = "c{.col}"))
+
+# Add centroid coordinates to each cell
+df_dist <- dt %>%
+  left_join(centroids, by = c("Clone"))
+
+# --------------------------------------------------------------
+# Compute Euclidean distance to clone centroid
+# --------------------------------------------------------------
+df_dist <- df_dist %>%
+  dplyr::add_count(Clone, name = "n_cells") %>%  # number of cells per clone
+  dplyr::filter(n_cells >= 2) %>%          # retain multicellular clones only
+  group_by(Clone) %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate( dist_to_centroid = sqrt(sum(
+      (dplyr::c_across(starts_with("LSI_")) -
+       dplyr::c_across(starts_with("cLSI_")))^2
+    ))
+  ) %>%
+  ungroup()
+
+# --------------------------------------------------------------
+# Transfer clone expansion status from matched RNA profiles
+# --------------------------------------------------------------
+df_dist <- df_dist %>%
+ left_join(seu@meta.data[, c("BC_RNA", "ExpandedClone")] , by = c("BC_RNA" = "BC_RNA")) %>% distinct()
+
+
+# --------------------------------------------------------------
+# Export table
+# --------------------------------------------------------------
+df_dist %>% write.table(., paste0(Res_dir, "/H3K4me1DistCentroid.txt"),
+                              quote = F, sep = "\t", row.names = F)
+```
+
+## H3K27me3 dataset
+```{r}
+DefaultAssay(seuEpi) <- "bin_50k_h3k27me3"
+#Normalize & RD
+seuEpi <- RunTFIDF(seuEpi)
+seuEpi <- FindTopFeatures(seuEpi)
+seuEpi <- RunSVD(seuEpi)
+seuEpi <- RunUMAP(seuEpi, reduction = 'lsi',  dims = 2:30)
+
+# Number of LSI dimensions used
+N_PC <- 11
+
+# Extract LSI embeddings (excluding the first component)
+pcs <- Embeddings(seuEpi,
+                  reduction = "lsi")[,2:N_PC] %>% as.data.frame()
+
+# Create cell-level metadata table
+dt <- data.frame(Clone =seuEpi@meta.data$LineageBarcode[which(seuEpi@meta.data$mark == "h3k27me3" )],
+                 BC_RNA = seuEpi@meta.data$BC_RNA[which(seuEpi@meta.data$mark == "h3k27me3" )],
+                       Sample = seuEpi@meta.data$SampleBio[which(seuEpi@meta.data$mark == "h3k27me3" )],
+                       Group = seuEpi@meta.data$Group[which(seuEpi@meta.data$mark == "h3k27me3" )]) %>%
+  cbind(pcs)
+
+head(dt)
+
+
+# --------------------------------------------------------------
+# Compute clone centroids in LSI space
+# --------------------------------------------------------------
+centroids <- dt %>%
+  dplyr::group_by(Clone) %>%
+  dplyr::summarise(across(paste0("LSI_", 2:N_PC), ~ mean(.x, na.rm = TRUE), .names = "c{.col}"))
+head(centroids)
+
+# Add centroid coordinates to each cell
+df_dist <- dt %>%
+  left_join(centroids, by = c("Clone"))
+
+# --------------------------------------------------------------
+# Compute Euclidean distance to clone centroid
+# --------------------------------------------------------------
+df_dist <- df_dist %>%
+  dplyr::add_count(Clone, name = "n_cells") %>%  # number of cells per clone
+  dplyr::filter(n_cells >= 2) %>%          # retain multicellular clones only
+  group_by(Clone) %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate( dist_to_centroid = sqrt(sum(
+      (dplyr::c_across(starts_with("LSI_")) -
+       dplyr::c_across(starts_with("cLSI_")))^2
+    ))
+  ) %>%
+  ungroup()
+
+# --------------------------------------------------------------
+# Transfer clone expansion status from matched RNA profiles
+# --------------------------------------------------------------
+df_dist <- df_dist %>%
+ left_join(seu@meta.data[, c("BC_RNA", "ExpandedClone")] , by = c("BC_RNA" = "BC_RNA")) %>% distinct()
+
+
+# --------------------------------------------------------------
+# Export table
+# --------------------------------------------------------------
+df_dist %>% write.table(., paste0(Res_dir, "/H3K27me3DistCentroid.txt"),
+                              quote = F, sep = "\t", row.names = F)
+```
+
+
+#Clone polyfunctionality analysis
+
+```{r}
+# Load cell-level metadata containing functional program (FP) scores
+meta_all_rna <- seurat_rna@meta.data
+
+```
+
+## Cell state assignment
+
+To focus on non-lineage-associated transcriptional programs,  lineage-related programs (MP1: Basal fate and MP2: Alveolar fate) were excluded from downstream analyses.
+```{r}
+meta <- meta_all_rna
+metadata_cells <- meta
+
+# Retain only molecular programs MP3-MP16
+ucell_mat_global <- meta[, (colnames(meta) %in% paste0("MP", 3:16))] 
+
+# Harmonize sample identifiers
+df <- meta_all_rna
+df[is.na(df$SampleBio ), "SampleBio"] <-  df[is.na(df$SampleBio ),"Exp"]
+df[df$SampleBio == "8724_NA", "SampleBio"] <-  "8724_AllGl.Pooled"
+df[df$SampleBio == "9475_NA", "SampleBio"] <-  "9475_AllGl.Pooled"
+
+
+# Reformat score matrix (programs in rows, cells in columns)
+ucell_mat_global <- ucell_mat_global[ rownames(df), ] %>% t
+
+# Center and scale program activities across the entire dataset
+ucell_mat <- ucell_mat_global 
+ucell_mat_global <- t(scale(t(ucell_mat_global), scale = T))
+ucell_mat_global[is.nan(ucell_mat_global)] <- 0
+
+# -------------------------------------------------------------- 
+# Define active molecular programs 
+# --------------------------------------------------------------
+# For each program, an activation threshold was defined as: 
+# mean positive score + 1 standard deviation
+
+nb_sds <- 1
+
+thr_vect <- apply(ucell_mat, 1, function(x) {
+    tmp <- x[x > 0]
+    tmp <- na.omit(tmp)
+    if (length(tmp) == 0) return(0)  # sécurité
+    return(mean(tmp) + nb_sds * sd(tmp))
+})
+
+# Binarize program activity
+ucell_mat_global_binary <- sweep(ucell_mat, 1, thr_vect, "-")
+
+# Cell states were assigned independently within each sample. 
+# A program was considered active when its score exceeded the threshold.
+{
+    list_mat <- list()
+    list_attrib <- list()
+    list_attrib_max <- list()
+    cell_id <- c()
+
+    for (sample_id in unique(df$SampleBio)) {
+
+        # Extract cells from the current sample
+        idx <- which(df$SampleBio == sample_id)
+        ucell_mat_sub <- ucell_mat_global_binary[, idx, drop = FALSE]
+
+        # --- Handle samples containing a single cell ---
+        if (is.null(dim(ucell_mat_sub))) {
+            ucell_mat_sub <- matrix(ucell_mat_sub, ncol = 1)
+            colnames(ucell_mat_sub) <- colnames(ucell_mat_global_binary)[idx]
+            rownames(ucell_mat_sub) <- rownames(ucell_mat_global_binary)
+        }
+
+        # Binary attribution of active programs
+        thr <- 0
+        tmp_attrib <- apply(ucell_mat_sub, 1, function(x) x >= thr)
+        list_attrib[[sample_id]] <- tmp_attrib
+
+        cell_id <- c(cell_id, colnames(ucell_mat_sub))
+
+        # save processed state matrix by sample
+        list_mat[[sample_id]] <- ucell_mat_global[, idx, drop = FALSE]
+
+       # Assign the dominant program to each cell
+        ucell_mat_sub2 <- ucell_mat_global[, idx, drop = FALSE]
+          
+      tmp_attrib2 <- apply( ucell_mat_sub2,   2,    
+                            function(x){
+                              if(all(is.na(x))){
+                                return(NA_character_)        }
+
+        tmp_max <- max(x, na.rm = TRUE)
+
+        if(tmp_max > thr){
+            rownames(ucell_mat_sub2)[which.max(x)][1]
+        } else {
+            "Unknown"
+        }
+    }
+)
+
+        list_attrib_max[[sample_id]] <- tmp_attrib2
+    }
+
+    df_attrib <- do.call(rbind, list_attrib)
+    rownames(df_attrib) <- cell_id
+    df_attrib <- df_attrib[colnames(ucell_mat_global), ]
+
+    vect_attrib <- do.call(c, list_attrib_max)
+    names(vect_attrib) <- cell_id
+    vect_attrib <- vect_attrib[colnames(ucell_mat_global)]
+}
+
+df <- cbind(df, df_attrib)
+df$state_max <- vect_attrib
+```
+```{r}
+
+colnames(df)[123:ncol(df)] <- paste0("Bin_", colnames(df)[123:ncol(df)])
+hallmark_cols <- grep("^Bin_MP", colnames(df)[123:ncol(df)], value = TRUE)
+
+df$umap1 <- Embeddings(seurat_rna , "UMAP_spectral_rna_umi_harmony")[, 1]
+df$umap2 <- Embeddings(seurat_rna , "UMAP_spectral_rna_umi_harmony")[, 2]
+```
+
+
+
+
+```{r}
+# -------------------------------------------------------------- 
+# Functional annotation of programs 
+# --------------------------------------------------------------
+
+# Molecular programs were grouped into biologically interpretable 
+# functional categories.
+df <- df %>% 
+  mutate(state_max_relev = case_when(state_max == "MP1" ~ "Basal fate",
+                                     state_max == "MP2" ~ "Alveolar fate",
+                                     state_max == "MP3" ~ "AP1 activation",
+                                     state_max == "MP4" ~ "Angiogenic remodeling",
+                                     state_max == "MP7" ~ "Inflammation, cytokines",
+                                     state_max == "MP9" ~ "Focal adhesion",
+                                     state_max == "MP10" ~ "Prostaglandin synthesis",
+                                     state_max == "MP12" ~ "OxPhos",
+                                     state_max == "MP14" ~ "Genome maintenance",
+                                     state_max == "MP15" ~ "Lipid metabolism",
+                                     state_max == "MP16" ~ "EMT",
+                                     TRUE ~ state_max))
+
+
+
+# Compute clone size and relative abundance within each sample
+df_Clone <- df %>%
+  as.data.frame() %>%
+  dplyr::filter(!is.na(Barcode)) %>%                              #  retain barcoded cells only
+  dplyr::group_by(SampleBio) %>%
+  dplyr::mutate(TotalCells = n()) %>%                             # total number of barcoded cells per sample
+  dplyr::group_by(SampleBio, Barcode) %>%
+  dplyr::mutate(CloneSize = n()) %>%                              # number of cells per clone
+  dplyr::ungroup() %>%
+  dplyr::mutate(PercentClone = 100 * CloneSize / TotalCells) %>%       # normalized clone abundance
+  mutate(BCM_PercentClone_MonoGl = case_when(SampleBio %in% 
+                                               c("8964_G4", "8718_D2-3", "8415_G2-3") ~ PercentClone,
+                                             TRUE ~ NA)) %>%
+  mutate(ExpandedClone = case_when(SampleBio %in% c("8964_G4", "8718_D2-3", "8415_G2-3") & 
+                                     PercentClone >= 10 ~"Expanded",
+                                   SampleBio %in% c("8964_G4", "8718_D2-3", "8415_G2-3") & 
+                                     PercentClone < 2 ~"Small",
+                                   SampleBio %in% c("8964_G4", "8718_D2-3", "8415_G2-3") & 
+                                     PercentClone < 10 &
+                                     PercentClone >= 2 ~"Int",
+                                   TRUE ~ NA))
+
+# --------------------------------------------------------------
+# Export table
+# --------------------------------------------------------------
+df %>% 
+  write.table(., paste0(Res_dir, "/FunctionalProgramAssignment_all.txt"),
+                              quote = F, sep = "\t", row.names = T)
+
+df_Clone %>% 
+  write.table(., paste0(Res_dir, "/FunctionalProgramAssignment.txt"),
+                              quote = F, sep = "\t", row.names = F)
+```
+
+## NMF Annotations
+
+```{r}
+r <- FindAllMarkers(seurat_rna, group.by = "state_max_relev")
+
+
+```
+```{r}
+r %>% group_by(cluster) %>% 
+  filter(cluster == "Stress survival" & avg_log2FC > 0) %>% #Stress survival  Genome maintenance Mitochondrial-stress response
+  arrange(p_val_adj) %>% 
+  select(gene) %>% head(100) %>% View
+```
+
+
+```{r}
+anno_FP <-  read.delim(paste0(Input_Dir, "/FunctionalProgramAssignment_all.txt"))
+head(anno_FP)
+```
+
+
+FP3 - PID_AP1_PATHWAY ; 
+      BIOCARTA_FOSB_PATHWAY 
+        *AP1*
+FP4 - WP_VEGFAVEGFR2_SIGNALING_PATHWAY ; 
+      ABE_VEGFA_TARGETS 
+        *Angiogenesis*
+FP7 - BIOCARTA_MSP_PATHWAY (Macrophage stimulatiing prot) ;
+      WP_CYTOKINES_AND_INFLAMMATORY_RESPONSE
+      KEGG_CYTOKINE_CYTOKINE_RECEPTOR_INTERACTION
+        *Inflammation, cytokines*
+FP9 - WP_FOCAL_ADHESION ;
+      KEGG_FOCAL_ADHESION 
+        *focal Adhesion / lncRNA*
+FP10 - WP_PROSTAGLANDIN_SYNTHESIS_AND_REGULATION
+        *psotaglandin synthesis*
+
+FP12 - KEGG_OXIDATIVE_PHOSPHORYLATION
+       WP_OXIDATIVE_PHOSPHORYLATION
+       WP_ELECTRON_TRANSPORT_CHAIN_OXPHOS_SYSTEM_IN_MITOCHONDRIA
+       HALLMARK_OXIDATIVE_PHOSPHORYLATION
+         *OxPhos*
+
+FP14 - WP_DNA_MISMATCH_REPAIR
+       KAUFFMANN_DNA_REPLICATION_GENES
+       KEGG_DNA_REPLICATION
+       WP_DNA_REPLICATION
+       REACTOME_DNA_REPAIR
+       KEGG_RNA_DEGRADATION
+        *Genome maintenance*
+        
+FP15 - KEGG_GLYCEROLIPID_METABOLISM
+       REACTOME_METABOLISM_OF_LIPIDS
+       WP_MAMMARY_GLAND_DEVELOPMENT_PATHWAY_PREGNANCY_AND_LACTATION_STAGE_3_OF_4
+       *lipid metabolism*
+       
+FP16 - GOTZMANN_EPITHELIAL_TO_MESENCHYMAL_TRANSITION_UP
+       HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION
+        *EMT*
+        
+```{r}
+library(Seurat)
+library(UCell)
+library(msigdbr)
+library(dplyr)
+library(ggplot2)
+
+msig <- msigdbr(species = "Mus musculus")
+
+
+
+FP_pathways <- list(
+
+FP3 = c(
+"PID_AP1_PATHWAY" #,"BIOCARTA_FOSB_PATHWAY"
+),
+
+FP4 = c(
+"WP_VEGFAVEGFR2_SIGNALING_PATHWAY" #,"ABE_VEGFA_TARGETS"
+),
+
+FP7 = c(
+#"BIOCARTA_MSP_PATHWAY",
+"WP_CYTOKINES_AND_INFLAMMATORY_RESPONSE" #,"KEGG_CYTOKINE_CYTOKINE_RECEPTOR_INTERACTION"
+),
+
+FP9 = c(
+"WP_FOCAL_ADHESION"#,"KEGG_FOCAL_ADHESION"
+),
+
+FP10 = c(
+"WP_PROSTAGLANDIN_SYNTHESIS_AND_REGULATION"
+),
+
+FP12 = c(
+"KEGG_OXIDATIVE_PHOSPHORYLATION"#,"WP_OXIDATIVE_PHOSPHORYLATION","WP_ELECTRON_TRANSPORT_CHAIN_OXPHOS_SYSTEM_IN_MITOCHONDRIA","HALLMARK_OXIDATIVE_PHOSPHORYLATION"
+),
+
+FP14 = c(
+"WP_DNA_MISMATCH_REPAIR",
+#"KAUFFMANN_DNA_REPLICATION_GENES",
+#"KEGG_DNA_REPLICATION",
+"WP_DNA_REPLICATION" #,"REACTOME_DNA_REPAIR","KEGG_RNA_DEGRADATION"
+),
+
+FP15 = c(
+#"KEGG_GLYCEROLIPID_METABOLISM"#,
+  "REACTOME_METABOLISM_OF_LIPIDS"#,"WP_MAMMARY_GLAND_DEVELOPMENT_PATHWAY_PREGNANCY_AND_LACTATION_STAGE_3_OF_4"
+),
+
+FP16 = c(
+#"GOTZMANN_EPITHELIAL_TO_MESENCHYMAL_TRANSITION_UP",
+"HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION"
+)
+
+)
+
+#consruct gene sets 
+gene_sets <- list()
+
+for(fp in names(FP_pathways)){
+
+    for(gs in FP_pathways[[fp]]){
+
+        genes <- msig %>%
+            filter(gs_name == gs) %>%
+            pull(gene_symbol) %>%
+            unique()
+
+        genes <- intersect(genes, rownames(seurat_rna))
+
+        if(length(genes) >= 10){
+
+            gene_sets[[gs]] <- genes
+
+        }
+
+    }
+
+}
+
+#compute UCell score
+sic <- AddModuleScore_UCell(
+    seurat_rna,
+    features = gene_sets
+)
+#Make table
+scores <- FetchData(
+    sic,
+    vars = paste0(names(gene_sets),"_UCell")
+)
+#add state
+scores$cell <- rownames(scores)
+scores$state_max_relev <- anno_FP$state_max_relev
+
+#mean by state
+heat <- scores %>%
+  filter( !is.na(state_max_relev)) %>%
+group_by(state_max_relev) %>%
+summarise(across(ends_with("_UCell"), mean))
+
+mat <- heat %>%
+column_to_rownames("state_max_relev") %>%
+as.matrix()
+
+
+mat <- t(scale((mat)))
+
+my.cols <- colorRampPalette(c(
+    "#3B7EA1",   # bleu doux
+    "#F8F4E8",   # ivoire
+    "#A6365D"    # bordeaux
+))(101)
+
+pheatmap(
+  mat[, c("AP1 activation",          
+        "Angiogenic remodeling",
+        "Inflammation, cytokines" ,
+         "Focal adhesion"  ,
+         "Prostaglandin synthesis",
+         "OxPhos",
+         "Genome maintenance",
+        "Lipid metabolism",
+        "EMT")],
+  cluster_rows=F,
+  cluster_cols=F,
+    color = my.cols,
+    breaks = seq(-2, 2, length.out = 102),
+border_color=NA
+)
+```
+```{r}
+
+grep("ox", unique(msig_wp$gs_name),
+     ignore.case = TRUE, value = TRUE)
+
+
+VEGF_sig <- msig_wp %>%
+    filter(gs_name == "HALLMARK_OXIDATIVE_PHOSPHORYLATION") %>%
+    pull(gene_symbol) %>%
+    str_to_title() %>%
+    unique() %>%
+  intersect(.,  rownames(seurat_rna) )
+
+
+#compute module
+seurat_rna <- AddModuleScore_UCell(
+    seurat_rna,
+    features = list(WP_VEGFA = VEGF_sig)
+)
+
+#Add score
+anno_FP$WP_VEGFA <-seurat_rna$WP_VEGFA_UCell[
+    match(rownames(anno_FP), colnames(seurat_rna))
+]
+#make graph
+ggplot( anno_FP,  
+        aes(x = state_max_relev, y = scale(WP_VEGFA), fill = state_max_relev)) +
+  geom_violin(alpha=0.5)+
+  geom_boxplot(alpha=0.5, width = 0.2, fill = "white") +
+  geom_hline(yintercept = 0)+
+  theme_classic() +
+  scale_fill_manual(values= state_colors )+
+  scale_x_discrete(limits = state_colors %>% names) +
+  labs(
+    x="Maximum functional programme relevance")
+```
+
+```{r}
+msig_h <- msigdbr(
+  species = "Mus musculus",
+  category = "H"
+)
+```
+```{r}
+grep("Angio", unique(msig_h$gs_name),
+     ignore.case = TRUE, value = TRUE)
+
+test_sig <- msig_h %>%
+    filter(gs_name == "HALLMARK_ANGIOGENESIS") %>%
+    pull(gene_symbol) %>%
+    unique()
+
+#check which genes are presents
+test_sig <- intersect(
+    test_sig,
+    rownames(seurat_rna)
+)
+
+
+#compute module
+seurat_rna <- AddModuleScore_UCell(
+    seurat_rna,
+    features = list(test = test_sig)
+)
+
+#Add score
+anno_FP$test <-seurat_rna$test_UCell[
+    match(rownames(anno_FP), colnames(seurat_rna))
+]
+#make graph
+ggplot( anno_FP,  aes(x = state_max_relev, y = scale(test), fill = state_max_relev)) +
+  geom_violin(alpha=0.5)+
+  geom_boxplot(alpha=0.5, width = 0.2, fill = "white") +
+  geom_hline(yintercept = 0)+
+  theme_classic() +
+  scale_fill_manual(values= state_colors )+
+  scale_x_discrete(limits = state_colors %>% names) +
+  labs(
+    x="Maximum functional programme relevance",
+    y="test (UCell)"
+)
+```
+
+
+
+
+## Quantification of clone poly-functionality 
+
+Cells from monoclonal samples were retained and clones were stratified into Small, Intermediate, or Expanded categories according to sample-specific clone size distributions.
+```{r}
+
+df_sub <- df  %>%
+  dplyr::filter(
+    SampleBio %in% c("8964_G4", "8718_D2-3", "8415_G2-3"),
+    !is.na(Barcode)  )%>%
+  left_join(seu@meta.data[, c("Barcode", "ExpandedClone")], by = "Barcode") %>%
+  distinct
+
+```
+
+Clone-level functional diversity was quantified using: 
+(i) MP entropy: 
+Shannon entropy calculated from the distribution of active molecular programs across all cells within a clone. 
+
+(ii) Number of active MPs: 
+Total number of distinct molecular programs detected within a clone, used as a measure of clone poly-functionality.
+
+```{r}
+library(entropy)
+mp_cols <- grep("^Bin_MP", colnames(df), value = TRUE)
+
+
+clone_stats <- df_sub %>%
+  group_by(Barcode) %>%
+  summarise(
+    clone_size = n(),
+    mean_pseudotime = mean(pseudotime, na.rm = TRUE),
+
+    MP_entropy = {
+      mp_counts <- colSums( across(all_of(mp_cols), ~ . == 1), na.rm = TRUE)
+      mp_counts <- mp_counts[mp_counts > 0]
+      entropy(mp_counts / sum(mp_counts)) #Shannon's entropy
+    },
+
+    n_active_MP = {
+      mp_counts <- colSums(across(all_of(mp_cols), ~ . == 1), na.rm = TRUE )
+      sum(mp_counts > 0)
+    },    .groups = "drop"  ) %>%
+  
+  left_join(df_sub[, c("Barcode","SampleBio","ExpandedClone")] %>% 
+              distinct(), by = "Barcode")
+
+
+# --------------------------------------------------------------
+# Export table
+# --------------------------------------------------------------
+clone_stats %>% write.table(., paste0(Res_dir, "/FP_byClone.txt"),
+                              quote = F, sep = "\t", row.names = F)
+```
+
+
+## Integration with barcode generation probability (Pgen)
+Clone-level poly-functionality metrics were integrated with Pgen values estimated using the IGOR pipeline.
+
+```{r}
+clone_stats <- clone_stats %>%
+  left_join(seurat_rna@meta.data[, c("Barcode", "Pgen")] , by = c("Barcode" = "Barcode")) %>%
+  distinct()
+head(clone_stats)
+```
+To evaluate the influence of barcode generation probability on clone poly-functionality, progressively more stringent Pgen thresholds were applied (10^0 to 10^-7).
+
+```{r}
+library(purrr)
+
+res_pgen_MP <- map_dfr(thresholds, function(thr){
+
+  tmp <- clone_stats %>%
+    filter(Pgen <= thr)
+
+  tmp %>%
+    group_by(ExpandedClone) %>%
+    summarise(
+      threshold = thr,
+      n_clones = n(),
+      mean_MP = mean(n_active_MP, na.rm = TRUE),
+      median_MP = median(n_active_MP, na.rm = TRUE),
+      sem = sd(n_active_MP, na.rm = TRUE)/sqrt(n()),
+      .groups = "drop"
+    )
+})
+# --------------------------------------------------------------
+# For each threshold, AOV
+# --------------------------------------------------------------
+stats <- purrr::map_dfr(thresholds[1:12], function(thr){
+  dat <- clone_stats %>%
+    filter(  Pgen <= thr)
+
+  fit <- aov(n_active_MP  ~ ExpandedClone, data = dat)
+
+  broom::tidy(fit) %>%
+    filter(term == "ExpandedClone") %>%
+    transmute(
+      Thr = thr,
+      logThr = -log10(thr),
+      p = p.value
+    )
+})
+stats
+# --------------------------------------------------------------
+# Export tableS
+# --------------------------------------------------------------
+res_pgen_MP %>% write.table(., paste0(Res_dir, "/FP_byClone_Pgen.txt"),
+                              quote = F, sep = "\t", row.names = F)
+
+```
+
+
+
+# Lineage switch score : 
+```{r}
+# build the single-cell metadata table
+df <-  seurat_rna@meta.data %>%
+  dplyr::filter(!Group %in% c("Tumor", "CreN")) %>%  # remove tumor and control samples
+  dplyr::select(WhichGland, Barcode, annot_rna_joint_alv, Group, Pgen) %>%
+  dplyr::filter(!WhichGland %in% c("AllGl.Pooled") ) %>%
+  dplyr::filter(!is.na(Barcode), !is.na(annot_rna_joint_alv))  
+
+# Metadata at clone ( lineage barcode) level
+metadata_barcode <- seurat_rna@meta.data %>%
+  dplyr::filter(!Group %in% c("Tumor", "CreN")) %>%
+  dplyr::select(WhichGland, Barcode, annot_rna_joint_alv, Group, Pgen) %>%
+  dplyr::filter(!WhichGland %in% c("AllGl.Pooled") ) %>%
+  dplyr::filter(!is.na(Barcode), !is.na(annot_rna_joint_alv))  %>%
+  dplyr::select( c("Group",  "Barcode", "Pgen")) %>%
+  dplyr::filter(!duplicated(Barcode))
+
+# ------------------------------------------------------------
+# Compute clone-level lineage switching metrics
+# ------------------------------------------------------------
+
+df_clone_stats <-df %>% 
+  group_by(Barcode) %>%
+  summarise(
+    n_total = n(),# total number of cells per clone
+    
+     # number of cells in each lineage state
+    n_LP = sum(annot_rna_joint_alv == "LP", na.rm = TRUE),
+    n_Basal = sum(annot_rna_joint_alv == "Basal", na.rm = TRUE),
+    n_Alv = sum(annot_rna_joint_alv == "Alv", na.rm = TRUE),
+    
+      # number of cells not in LP state (i.e., switched states)
+    n_other = sum(annot_rna_joint_alv != "LP" & !is.na(annot_rna_joint_alv)),
+    
+     # lineage switching score: fraction of non-LP cells per clone
+    switch_score = n_other / n_total  ) %>%
+  ungroup() %>%
+  dplyr::select(n_total  ,n_LP, n_Basal, n_Alv,n_other ,switch_score, Barcode   ) %>%
+  left_join(metadata_barcode, by = "Barcode") %>% # add clone-level metadata (Group, Pgen)
+  dplyr::filter(!duplicated(Barcode)) # ensure unique clones
+
+
+# --------------------------------------------------------------
+# Export table
+# --------------------------------------------------------------
+df_clone_stats %>% write.table(., paste0(Res_dir, "/CellFateSwitch.txt"),
+                              quote = F, sep = "\t", row.names = F)
+```
+
+## Integration with barcode generation probability (Pgen)
+```{r}
+# ------------------------------------------------------------
+# Define Pgen thresholds for filtering clones
+# ------------------------------------------------------------
+thresholds <- 10^seq(0, -7, by = -0.25)
+thresholds
+```
+
+
+```{r}
+# ------------------------------------------------------------
+# Evaluate switch score as a function of Pgen threshold
+# ------------------------------------------------------------
+
+
+res_pgen <- map_dfr(thresholds, function(thr){
+
+   # keep only clones with Pgen below threshold (more "likely independent" barcodes)
+  df_filt <- df_clone_stats %>%
+    filter(Pgen <= thr)
+
+  #  compute switch statistics at group level
+  summary_group <- df_filt %>%
+    group_by(Group) %>%
+    summarise(
+      n_clones = n(),
+      
+      # central tendency of switch score
+      mean_switch = mean(switch_score, na.rm = TRUE),
+      median_switch = median(switch_score, na.rm = TRUE),
+      prop_switch = mean(switch_score > 0),
+      .groups = "drop"
+    )
+
+   # extract early and late groups separately
+  early <- summary_group %>%
+    filter(Group == "CreP_EARLY")
+
+  late <- summary_group %>%
+    filter(Group == "CreP_LATE")
+
+   # assemble results for each threshold
+  tibble(
+    threshold = thr,
+    n_Early = early$n_clones,
+    n_Late = late$n_clones,
+
+    mean_switch_Early = early$mean_switch,
+    mean_switch_Late = late$mean_switch,
+
+    median_switch_Early = early$median_switch,
+    median_switch_Late = late$median_switch,
+
+    prop_switch_Early = early$prop_switch,
+    prop_switch_Late = late$prop_switch,
+
+      # ratios late vs early
+    ratio_mean = late$mean_switch / early$mean_switch,
+    ratio_median = late$median_switch / early$median_switch,
+    ratio_prop = late$prop_switch / early$prop_switch
+  )
+})
+
+
+# --------------------------------------------------------------
+# For each threshold, AOV
+# --------------------------------------------------------------
+stats <- purrr::map_dfr(thresholds[1:27], function(thr){
+  dat <- df_clone_stats %>%
+    filter(  Pgen <= thr)
+
+  fit <- aov(switch_score  ~ Group, data = dat)
+
+  broom::tidy(fit) %>%
+    filter(term == "Group") %>%
+    transmute(
+      Thr = thr,
+      logThr = -log10(thr),
+      p = p.value
+    )
+})
+stats
+
+# --------------------------------------------------------------
+# Export table
+# --------------------------------------------------------------
+res_pgen %>% write.table(., paste0(Res_dir, "/CellFateSwitch_Pgen.txt"),
+                              quote = F, sep = "\t", row.names = F)
+```
+
+# Expanded clone markers – DEG analysis (Fig 3 / related)
+
+```{r}
+# ------------------------------------------------------------
+# Build metadata table for clones
+# ------------------------------------------------------------
+dt <- data.frame(fractionclone = seu$PercentClone,
+                 value = seu$CloneSize,
+                 sample = seu$SampleBio.x,
+                 fill = seu$Group,
+                 bcm = seu$Barcode)
+
+# Subset: selected Gland entierly screened & clones >= 5 cells
+mini_dt <- dt %>% 
+  subset(sample %in% c("8964_G4", "8718_D2-3", "8415_G2-3")) %>%
+  subset(value >= 5) 
+
+table(mini_dt$bcm, mini_dt$sample)
+```
+
+```{r}
+# ------------------------------------------------------------
+# Define expanded clone identities in Seurat object
+# ------------------------------------------------------------
+# Rule:
+# - True expanded clones (size >= 5) keep their barcode
+# - Small clones (<2% frequency) are grouped as "Small_<sample>"
+seu@meta.data <- seu@meta.data %>%
+  mutate(ExpandedClone_nameSup5 = case_when(SampleBio.x %in% c("8964_G4", "8718_D2-3", "8415_G2-3") & 
+                                     CloneSize >= 5 ~ Barcode,
+                                   SampleBio.x %in% c("8964_G4", "8718_D2-3", "8415_G2-3") & 
+                                     PercentClone < 2 ~paste0("Small", "_", SampleBio.x),
+                                   TRUE ~ NA))
+
+# ------------------------------------------------------------
+# Build table of clone × sample with clone sizes
+# ------------------------------------------------------------
+SampleCloneSup5 <- ClonesSup5 <- table(mini_dt$bcm, mini_dt$sample) %>% 
+  melt %>% 
+  filter(!value <5)
+
+colnames(SampleCloneSup5) <- c("Barcode", "Sample", "CloneSize")
+
+# ------------------------------------------------------------
+# Initialize DEG results metrix
+# ------------------------------------------------------------
+DEGs_sup5 <- data.frame(p_val= NULL, avg_log2FC=NULL, 
+                        pct.1 = NULL, pct.2 = NULL, p_val_adj = NULL,
+                        clone = NULL, sampleOrigine = NULL, clonesize = NULL, gene = NULL
+                        )
+# ============================================================
+# Loop over expanded clones to compute DEGs
+# ============================================================
+for (i in 1:nrow(SampleCloneSup5)) {
+  
+  clone <- SampleCloneSup5$Barcode[i]
+  sampleOrigine <- SampleCloneSup5$Sample[i]
+  clonesize <- SampleCloneSup5$CloneSize[i]
+  
+  # Differential expression: clone vs small clones
+  
+  res <- FindMarkers(seu ,
+                         group.by = "ExpandedClone_nameSup5", 
+                         ident.1 = clone ,
+                         ident.2 = c("Small_8415_G2-3",  "Small_8718_D2-3", "Small_8964_G4"),
+                         test.use = 'wilcox',only.pos = F,
+  recorrect_umi = FALSE)
+  
+  
+  # Keep significant DEGs only
+  
+  signature_Clone <- subset(res, p_val_adj < 0.05)
+  annot <- data.frame(clone = rep(clone, nrow(signature_Clone)),
+                      sampleOrigine = rep(sampleOrigine, nrow(signature_Clone)),
+                      clonesize = rep(clonesize, nrow(signature_Clone)))
+  dt_int <- cbind(signature_Clone, annot)
+  dt_int$gene = rownames(signature_Clone)
+  rownames(dt_int) <- paste0(dt_int$gene, dt_int$sampleOrigine)
+  
+  DEGs_sup5 <- rbind(DEGs_sup5, dt_int)
+  
+  # Volcano plot
+  DEG <- res
+
+  DEG$signif <- DEG$p_val_adj < 0.05
+  DEG$FC <- rep(NA, nrow(DEG))
+  DEG$FC[which(DEG$avg_log2FC > 0 & DEG$signif ==TRUE)] = "UP"
+  DEG$FC[which(DEG$avg_log2FC < 0 & DEG$signif ==TRUE)] = "DW"
+
+  DEG$gene <- rownames(res)
+
+  sub <- sample(1:nrow(DEG), size = 100, replace = F) 
+
+
+
+      gg1 <- ggplot(DEG[sub,],
+          aes(x = (avg_log2FC), y = -log10(p_val_adj), 
+              fill = FC , size = signif, alpha = signif) )+
+        geom_point(shape = 21, colour = "black")+ 
+        geom_point(data = subset(DEG, signif == TRUE), 
+             shape = 21, colour = "black") +
+        geom_label_repel(data = subset(DEG, signif == TRUE), 
+                   aes(label = gene),  force = 2,  max.overlaps =100) +
+  
+        geom_hline(yintercept = -log10(0.05), linetype = "dashed") + 
+        geom_vline(xintercept = c(log2(0.5), log2(2)),linetype = "dashed") +
+        
+        ggtitle(paste0(clone,"\n", sampleOrigine, "_n=",clonesize))+
+  
+        scale_fill_manual(values = c("#d81159")) + 
+        scale_size_manual(values = c(2,2,1)) + 
+        scale_alpha_manual(values = c(0.5, 1,1)) +
+        scale_x_continuous(breaks = c(seq(-10, 10, 2)),       
+                     limits = c(-10, 10))  +
+        scale_y_continuous(limits = c(0,10))+
+        theme_bw() +
+        theme(panel.border = element_rect(colour = "black", fill = NA, size= 0.5),    
+              panel.grid.minor = element_blank(),
+              panel.grid.major = element_blank())
+
+  gg1 %>% print()
+
+}
+```
+
+```{r}
+# ------------------------------------------------------------
+# Summary checks
+# ------------------------------------------------------------
+DEGs_sup5 %>% head()
+
+# Most frequent DE genes
+DEGs_sup5$gene %>% table %>% sort() %>% tail(., 40)
+```
+
+
+
+
+
+```{r}
+# ============================================================
+# Build binary DEG matrix (presence/absence per clone)
+# ============================================================
+mat_deg <- DEGs_sup5 %>%
+  dplyr::filter(avg_log2FC > 0) %>%  # keep only UP-regulated genes
+  mutate(DEG_present = 1) %>%
+  dplyr::select(gene, clone, DEG_present) %>%
+  distinct() %>%
+  pivot_wider(names_from = clone, values_from = DEG_present, values_fill = 0)
+
+
+# Save full DEG table and matrix
+write.csv(mat_deg, paste0(Res_dir,  "/mat_degSup5.csv"))
+write.csv(DEGs_sup5, paste0(Res_dir,  "/DEGs_sup5.csv"))
+
+# ------------------------------------------------------------
+# Identify genes shared across multiple expanded clones
+# ------------------------------------------------------------
+genes_multi <- mat_deg$gene[rowSums(mat_deg[2:20]) > 1]
+mat_multi <- mat_deg %>% 
+  filter(gene %in% genes_multi)
+
+# Save
+write.csv(mat_multi, paste0(Res_dir,  "/mat_degSup5_UP_multi.csv"))
+```
+
+
+
+
+
+
+

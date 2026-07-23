@@ -1,0 +1,1349 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Intro
+
+```{r}
+cols_Group <- c("CreP_EARLY" = "#C0D69F", 
+                "CreN" = "grey",
+                "CreP_LATE"  = "#61980E",
+                "Tm"    = "#841811")
+```
+
+
+```{r}
+library(CellBarcode)
+library("ggnewscale") ; library(ggpubr)
+
+
+library(data.table)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+
+library(Seurat)
+library(patchwork)
+library(DoubletFinder)
+
+library(ggplot2)
+library(gridExtra)
+library(ggExtra)
+library(viridis)
+library(Matrix)
+library("ggsci")
+library(cowplot)
+library(platetools)
+library(scales)
+library("gridExtra")
+library(qs)
+library(RColorBrewer)
+
+library(stringdist)
+library(Biostrings)
+library(msa)
+library(seqinr)
+library(ggmsa)
+```
+
+
+Before the following workflow was done, to construct and annotated the DRAG-related object
+- import sc metadata and DRAG FASTQ files;
+- extract lineage barcodes from R1, R2 and hybrid (R2 + UMI) reads > *Bold sequences* indicated the motif grepped (no filter on UMI / depth)
+
+5’-acctcctcgaggtca*tcgaagtatcaagtcca*gtag   V sequence
+5'-tctactatcgttacgac                        D sequence
+5'-gtagctact*accgtagcaagctcgagagtagacCTACTG*      J sequence + linker GFP
+length: 86nt
+
+- summarize all detected barcodes for each cell;
+- merge barcode information with sc metadata;
+- Add Pgen
+- save the annotated metadata for downstream analyses.
+
+
+
+```{r}
+# Define the output directory and load the metadata table containing raw DRAG barcode information
+outputDir <- "C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/sc_DRAG/"
+
+DRAG_All <- qs::qread(paste0(outputDir, "sc_Metadata_withAllDRAG.qs"))
+
+Pgen_table <- read.delim("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Tables/SupplementaryTable_Pgen.txt")
+
+```
+
+```{r}
+#Add complementary fixed part to the barcodes sequences
+DRAG_All$R1_seq_raw_long <- lapply(DRAG_All$R1_seq_raw,
+                                   function(X){
+                                     paste0(toupper("acctcctcgaggtcatcgaagtatcaagtcca"),
+                                            X,
+                                            toupper("accgtagcaagctcgagagtagac"))
+                                   }
+)
+
+```
+
+# QC
+
+## Before barcode quality control
+### Evaluate barcode generation probability (Pgen) prior to filtering
+
+- Extract all raw R1 lineage barcodes from the single-cell metadata and annotate each barcode with its estimated probability of generation (Pgen).
+
+- Quantify the number of distinct mice in which each barcode is detected to estimate barcode sharing across animals.
+
+- Visualize the distribution of barcode generation probabilities according to the degree of barcode sharing between mice. Frequently shared barcodes are expected to exhibit higher Pgen values, consistent with independent recurrent generation rather than true clonal relationships.
+
+- Assess the impact of increasingly stringent Pgen thresholds on barcode sharing by calculating, for each threshold (10^-x), the fraction of barcodes detected in more than one mouse. This analysis guides the selection of a Pgen cutoff that minimizes independently generated recurrent barcodes while retaining the largest possible number of informative lineage barcodes.
+
+```{r}
+# Extract all raw R1 lineage barcodes and associated mouse identifiers.
+AllBCM1_R1 <- DRAG_All %>%
+  select(MouseNumber, R1_seq_raw_long) %>%
+  unnest(R1_seq_raw_long)  # Expand cells containing multiple barcodes into one row per barcode.
+
+
+# Annotate each unique barcode with its estimated probability of generation (Pgen).
+AllBCM1_R1 <- AllBCM1_R1 %>%
+  left_join(
+    Pgen_table %>% 
+      dplyr::select(sequence, Pgen) %>%
+      distinct(),
+    by = c("R1_seq_raw_long" = "sequence")
+  )
+
+# Count the number of distinct mice in which each barcode is detected.
+AllBCM1_R1 <- AllBCM1_R1 %>%
+  ungroup() %>% group_by( R1_seq_raw_long) %>%
+  mutate(Barcode_sharing_mice_N = n_distinct(MouseNumber))
+
+# SClassify barcodes ccording to the number of mice in which they are detcted
+
+AllBCM1_R1 %>%
+  dplyr::filter(!is.nan(Pgen), !is.na(Pgen),is.finite(Pgen)) %>%   
+  ungroup() %>% group_by(R1_seq_raw_long) %>%
+  summarise(
+    Pgen = dplyr::first(Pgen),
+    Barcode_sharing_mice_N = max(Barcode_sharing_mice_N),
+    .groups = "drop"
+  ) %>%
+  mutate(Barcode_sharing_mice_Factor = case_when(Barcode_sharing_mice_N == 1  ~ "unique",
+                                                 Barcode_sharing_mice_N > 1 & Barcode_sharing_mice_N < 4 ~ "2-3",
+                                                 Barcode_sharing_mice_N>=4 ~  "4-7")) %>%
+  mutate(Barcode_sharing_mice_Factor = factor(Barcode_sharing_mice_Factor,
+                                              levels = c("unique", 
+                                                         "2-3",
+                                                         "4-7"))) %>%
+  
+    # Visualize the Pgen distribution according to barcode sharing across mice. 
+  ggplot(aes(x = -log10(Pgen), fill = Barcode_sharing_mice_Factor)) +
+  geom_histogram(alpha = 0.5, aes(y = after_stat(count))) +
+   geom_vline(xintercept = 3.8)+
+  labs(
+    x = "Pgen",
+    fill = "Barcode sharing (# mice)",
+    title = "Pgen distribution by barcode sharing") +
+  theme_classic()
+```
+
+```{r}
+# Evaluate the effect of progressively more stringent Pgen thresholds on barcode sharing between mice.
+
+df <-AllBCM1_R1 %>%
+  dplyr::filter(!is.nan(Pgen), is.finite(Pgen)) %>%   # évite NaN / Inf
+   ungroup() %>%group_by(R1_seq_raw_long) %>%
+  summarise(
+    Pgen = dplyr::first(Pgen),
+    Barcode_sharing_mice_N = max(Barcode_sharing_mice_N),
+    .groups = "drop"  ) 
+
+# Define a grid of Pgen thresholds (10^-x).
+thr_grid <- seq(0, 11, by = 0.5)
+
+
+# For each threshold, calculate the fraction of barcodes shared by more than one mouse.
+res <- lapply(thr_grid, function(x){
+
+  thr <- 10^-x
+
+  sub <- df %>% dplyr::filter(Pgen <= thr)
+
+  if(nrow(sub) == 0){
+    return(data.frame(x = x, frac = NA))
+  }
+
+  frac_shared <- mean(sub$Barcode_sharing_mice_N > 1)
+
+  data.frame(
+    x = x,
+    frac = frac_shared
+  )
+
+}) %>% bind_rows()
+
+
+# Record the number of retained barcodes at each threshold.
+res$n <- sapply(thr_grid, function(x){
+  sum(df$Pgen <= 10^-x)
+})
+
+# Plot the fraction of shared barcodes as a function of the Pgen threshold.
+ggplot(res, aes(x = x, y = frac)) +
+  geom_point(size = 3) +
+  geom_text(aes(label = n), vjust = -1, size = 3)+
+  labs(
+    x = expression("Pgen threshold 10"^-x),
+    y = "Fraction barcode shared between mice"  ) +
+  theme_classic()
+```
+
+### Barcode capture rate assessment
+
+The proportion of cells with at least one detected DRAG barcode sequence (from R1 and/or R2 reads) is evaluated before applying any filtering step.
+
+```{r}
+# Compute the proportion of cells with at least one detected barcode sequence (R1 or R2) for each mouse and experimental group
+
+
+DRAG_All %>%
+  mutate(has_barcode = !is.na(R1_seq_raw) | !is.na(R2_seq_raw)) %>%
+  group_by(Group, MouseNumber) %>%
+  summarise(
+    has_barcode = sum(has_barcode),
+    n_cells = n(),
+    prop_barcoded = has_barcode / n_cells,
+       .groups = "drop"  ) %>%
+
+
+# Visualize barcode capture rate across experimental groups.
+# Bars represent the mean proportion of barcoded cells across mice, with error bars showing the standard deviation.
+
+  ggplot( aes(x = Group, y = prop_barcoded, fill = Group)) +
+    stat_summary(fun = mean, geom = "bar", width = 0.7, color = "black") +
+    stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1),
+               geom = "errorbar", width = 0.2) +
+    geom_jitter(width = 0.12, size = 2, alpha = 0.8) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 1)) +
+    labs( x = NULL,
+        y = "Cells with R1 or R2 barcode (%)"  ) +
+    theme_classic() +
+    theme(    legend.position = "none",
+      axis.text.x = element_text(angle = 45, hjust = 1)  )
+```
+
+```{r}
+# Quantify cells lacking any barcode detection in R1 and R2 according to Cre status
+table((is.na(DRAG_All$R1_seq_raw)& is.na(DRAG_All$R2_seq_raw)), DRAG_All$Cre)
+```
+
+```{r}
+1291/(1291+555)
+```
+
+
+Barcode detection efficiency was further evaluated separately for R1 and R2 reads. The proportion of cells with a barcode detected in each read was compared to the overall capture rate (R1 OR R2).
+
+```{r}
+# Define barcode detection status independently for R1 and R2
+df_prop <- DRAG_All %>%
+  mutate(
+    R1 = !is.na(R1_seq_raw),
+    R2 = !is.na(R2_seq_raw),
+    Either = R1 | R2
+  ) %>%
+  
+    # Calculate proportions per mouse and experimental group
+  group_by(Group, MouseNumber) %>%
+  summarise(
+    R1 = mean(R1),
+    R2 = mean(R2),
+    Either = mean(Either),
+    .groups = "drop"
+  ) %>%
+  
+    # Convert to long format for visualization
+  tidyr::pivot_longer(R1:Either,
+                      names_to = "Method",
+                      values_to = "Proportion")
+
+df_prop
+
+# Plot barcode capture rate according to the sequencing read
+ggplot(df_prop, aes(x = Group, y = Proportion)) +
+  stat_summary(fun = mean, geom = "bar", width = 0.7, color = "black", aes(fill = Method)) +
+  stat_summary(data = subset(df_prop, Method == "Either"),
+    fun.data = mean_sdl, fun.args = list(mult = 1),
+               geom = "errorbar", width = 0.2) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 1)) +
+  labs(
+    x = NULL,
+    y = "Cells with R1 or R2 barcode (%)"
+  ) +
+  theme_classic() +
+  theme(
+    #legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+Distribution of sequencing depth supporting the primary detected barcode.
+This analysis is used to evaluate the detection threshold applied during QC.
+
+```{r}
+# Replace empty barcode count lists by NA values
+DRAG_All$R1_count_raw[sapply(DRAG_All$R1_count_raw, is.null)] <- NA
+
+
+# Extract the read count of the primary barcode detected in each cell
+st <- data.frame(count = lapply(DRAG_All$R1_count_raw, function(X){X[1]}) %>% unlist,
+                 class = DRAG_All$Group)
+head(st)
+
+# Visualize barcode read count distribution.
+# The horizontal line indicates the selected minimum detection threshold
+# (3 reads).
+s <- ggplot(st, aes(x=class, y = log10(1+count), fill = class)) +
+  geom_boxplot()+
+  geom_jitter(shape = 21, alpha = 0.5)+
+  theme_classic()+
+  theme(legend.position = "top")+
+  geom_hline(yintercept = log10(3+1))
+s %>% print
+```
+
+## QC1 - Detection threshold
+
+We assess the consistency between R1 and R2 barcode detection by comparing the number of reads supporting each barcode in both sequencing reads.
+
+```{r}
+## A minimum detection threshold is evaluated based on the correlation between R1 and R2 barcode counts.
+
+st <- data.frame(count_R1 = lapply(DRAG_All$R1_count_raw, function(X){sum(X)}) %>% unlist,
+                 count_R2 = lapply(DRAG_All$R2_count_raw, function(X){sum(X)}) %>% unlist,
+                 class =DRAG_All$Group)
+
+
+# -------------------------------------------------------------- 
+# Visualize the correlation between R1 and R2 barcode counts.
+# --------------------------------------------------------------
+# Hexbin plot highlights the density of cells according to their barcode counts.
+# Individual cells are overlaid and colored by experimental group.
+
+g1 <- ggplot(st, aes(x = count_R1+1, y = count_R2+1))+
+  
+  geom_hex(bins = 20, color = "black")  +
+  scale_fill_gradientn(colours=brewer.pal(7,"Greys")) +
+  
+   new_scale_fill() +
+  
+  geom_jitter(aes(fill = class),
+              width = 0.03, height = 0.03, shape = 21)+
+  
+    # Linear regression to evaluate the correlation between R1 and R2 counts
+  geom_smooth(method=lm, se=TRUE, color = "black")+
+    # Display regression equation and adjusted R²
+  stat_regline_equation(aes(label =  paste(..eq.label.., ..adj.rr.label.., sep = "~~~~")),
+                        label.x=0, label.y=2.5, size=2, colour="black") + 
+  
+  scale_fill_manual(values = cols_Group )+
+  
+   # Highlight the detection threshold of 3 reads
+  geom_vline(xintercept = 3)+
+  geom_hline(yintercept = 3)+
+  theme_classic2()+ 
+  theme(legend.position = "right") +
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)), limits = c(-10, 10^3))+
+  scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)), limits = c(-10, 3*10^3))+
+  annotation_logticks(side = "bl", outside = F)
+```
+
+
+
+
+```{r}
+## Cells with multiple detected barcodes were further inspected.
+## We evaluated whether secondary barcodes corresponded to low-count events.
+
+# Identify cells containing more than one detected barcode
+idx <- which(lapply(DRAG_All$R1_seq_raw, length) > 1)
+
+# Number of cells containing multiple barcodes before filtering
+idx %>% length # 455 cells with multiple bcm if no filter on counts
+
+
+# Extract read counts of the first detected barcode and additional barcodes
+count_first <- lapply(DRAG_All$R1_count_raw[idx], function(X){X[1]}) %>% unlist
+count_other <- lapply(DRAG_All$R1_count_raw[idx], function(X){X[-1]}) %>% unlist
+
+
+# Compare read counts between primary and secondary barcodes
+dt <- data.frame(count = c(count_first, count_other),
+                 class = rep(c("first", "other"), 
+                             times = c(length(count_first), length(count_other))))
+
+
+# Distribution of barcode counts for primary and secondary barcodes
+ggplot(dt, aes(x=class, y = log10(1+count), fill = class)) +
+  geom_boxplot(notch = T, outliers = F)+
+  geom_jitter(shape = 21, alpha = 0.5, width = 0.03, height = 0.03)+
+  theme_classic()+
+  theme(legend.position = "top")+
+  geom_hline(yintercept = log10(3))
+
+```
+
+
+
+
+```{r}
+# -------------------------------------------------------------- 
+# Filter out barcodes supported by fewer than 3 reads.
+# --------------------------------------------------------------
+# This filtering is applied independently to R1 and R2.
+# Barcodes below this threshold are considered unreliable detections.
+
+
+# Keep only barcodes with at least 3 supporting reads in R1
+DRAG_All$R1_count_filter <- DRAG_All$R1_count_raw
+DRAG_All$R1_seq_filter <- DRAG_All$R1_seq_raw
+
+filtered_counts <- Map(function(count, seq) {
+  idx_rm <- which(count < 3)  
+  
+  if(length(idx_rm) == 0){
+    list(count = count, seq = seq)
+    }else{
+    list(count = count[-idx_rm], seq = seq[-idx_rm])
+      }  
+  }, 
+  DRAG_All$R1_count_raw, 
+  DRAG_All$R1_seq_raw)
+
+# Store filtered R1 barcode counts and sequences
+DRAG_All$R1_count_filter <- lapply(filtered_counts, `[[`, "count")
+DRAG_All$R1_seq_filter <- lapply(filtered_counts, `[[`, "seq")
+
+
+#######################
+# Same filtering applied to R2
+DRAG_All$R2_count_filter <- DRAG_All$R2_count_raw
+DRAG_All$R2_seq_filter <- DRAG_All$R2_seq_raw
+
+filtered_counts <- Map(function(count, seq) {
+  idx_rm <- which(count < 3)  
+  if(length(idx_rm) == 0){
+    list(count = count, seq = seq)
+    }else{
+    list(count = count[-idx_rm], seq = seq[-idx_rm]) 
+      } 
+  },
+  DRAG_All$R2_count_raw, 
+  DRAG_All$R2_seq_raw)
+
+DRAG_All$R2_count_filter <- lapply(filtered_counts, `[[`, "count")
+DRAG_All$R2_seq_filter <- lapply(filtered_counts, `[[`, "seq")
+
+
+# Replace empty barcode lists by NA values to facilitate downstream analyses
+DRAG_All$R1_seq_filter[which(DRAG_All$R1_seq_filter %>% lapply(., length) == 0)] <- NA
+DRAG_All$R2_seq_filter[which(DRAG_All$R2_seq_filter %>% lapply(., length) == 0)] <- NA
+
+```
+
+```{r}
+# Quantify the number of cells containing multiple barcodes before and after filtering
+
+#R1 
+idx <- which(lapply(DRAG_All$R1_seq_raw, length) > 1)
+length(idx) # 455 before
+
+res <- which(lapply(DRAG_All$R1_seq_filter, length) > 1)
+res %>% length # 97 cells with multiple bcm after filter
+
+#R2 
+idx <- which(lapply(DRAG_All$R2_seq_raw, length) > 1)
+length(idx) # 383 before
+
+res <- which(lapply(DRAG_All$R2_seq_filter, length) > 1)
+res %>% length # 61 cells with multiple bcm after filter
+
+```
+
+```{r}
+#Validation of R1/R2 barcode count correlation after filtering
+
+
+# Recalculate total barcode counts after removing low-confidence barcodes
+st <- data.frame(count_R1 = lapply(DRAG_All$R1_count_filter, function(X){sum(X)}) %>% unlist,
+                 count_R2 = lapply(DRAG_All$R2_count_filter, function(X){sum(X)}) %>% unlist,
+                 class = DRAG_All$Group)
+
+
+# Same visualization as before, after applying the detection threshold
+g3 <- ggplot(st, aes(x = count_R1+1, y = count_R2+1))+
+  
+  geom_hex(bins = 20, color = "black")  +
+  scale_fill_gradientn(colours=brewer.pal(7,"Greys")) +
+  
+   new_scale_fill() +
+  
+  geom_jitter(aes(fill = class),
+              width = 0.03, height = 0.03, shape = 21)+
+  geom_smooth(method=lm, se=TRUE, color = "black")+
+  stat_regline_equation(aes(label =  paste(..eq.label.., ..adj.rr.label.., sep = "~~~~")),
+                        label.x=0, label.y=2.5, size=2, colour="black") + #from ggpubr package
+  
+  geom_vline(xintercept = 3)+
+  geom_hline(yintercept = 3)+
+  scale_fill_manual(values = cols_Group)+
+  theme_classic2()+ 
+  theme(legend.position = "right") +
+  
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)), limits = c(-10, 10^3))+
+  scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)), limits = c(-10, 3*10^3))+
+  annotation_logticks(side = "bl", outside = F)
+
+```
+
+```{r}
+# Compare barcode detection before and after filtering
+grid.arrange(g1,g3, ncol = 2)
+
+```
+
+
+
+
+
+## QC2 - Remove PRC errors
+
+Multiple barcode sequences detected within the same cell may result from PCR amplification errors generating closely related barcode variants.
+
+We identify and correct potential PCR-derived barcode errors based on:
+
+1. Levenshtein distance between barcode sequences within each cell
+2. Relative abundance of barcode variants (fold-change compared to minor variants)
+
+Barcodes with highly similar sequences are merged, while ambiguous barcode assignments are discarded.
+
+
+```{r}
+## Evaluation of intra-cell barcode sequence similarity
+##
+## Levenshtein distances are computed between barcode sequences detected within the same cell to estimate the frequency of PCR-derived variants.
+
+#R1 
+idx <- which(lapply(DRAG_All$R1_seq_filter, length) > 1)
+length(idx) # 455 before
+
+res_iC <- lapply(DRAG_All$R1_seq_filter[idx] , 
+       function(X){
+             # Convert barcode sequences into DNAStringSet format
+         dnaSet <- DNAStringSet(X)
+         
+             # Multiple sequence alignment
+         align.msa = msa(dnaSet,method="ClustalOmega")
+         
+             # Convert alignment object for string distance computation
+         alignnment <- msaConvert(align.msa, "seqinr::alignment")
+         
+             # Compute pairwise Levenshtein distances between barcodes
+         stringdistmatrix(  
+           a = alignnment$seq[1],  
+           b = alignnment$seq[-1], 
+           useNames = T,    
+           method='lv',  
+           weight = c(d = 1, 
+                      i = 1, 
+                      s = 0.1, 
+                      t = 1))} )
+
+# Distribution of intra-cell barcode distances
+# Thresholds are visualized to define barcode merging criteria
+res_iC %>%   melt() %>% .$value %>% hist(., 100)  ; abline(v=2) ; abline(v=0.2)
+```
+
+```{r}
+## Barcode correction parameters
+
+# Maximum allowed Levenshtein distance between barcode variants
+thr_Lv = 0.2
+
+# Minimum abundance ratio between major and minor barcode variants
+thr_FC = 2
+```
+
+Correction of R1 barcode assignments
+
+```{r}
+# Initialize corrected barcode sequence and count columns
+DRAG_All$R1seq_filter_percell <- rep(NA, nrow(DRAG_All))
+DRAG_All$R1counts_filter_percell <- rep(NA, nrow(DRAG_All))
+
+# Process each cell independently
+for (k in 1:nrow(DRAG_All)) {
+  
+# Case 1: zero or one barcode detected in the cell
+   # No correction is required
+  if(length(DRAG_All$R1_seq_filter[[k]]) <= 1){
+    
+    DRAG_All$R1seq_filter_percell[[k]] <- DRAG_All$R1_seq_filter[[k]]
+    
+    if ( DRAG_All$R1_count_filter[[k]] %>% length > 0) {
+      DRAG_All$R1counts_filter_percell[[k]] =  DRAG_All$R1_count_filter[[k]]
+      }else{
+          DRAG_All$R1counts_filter_percell[[k]]  <- NA
+          }
+    
+    }else{
+   
+# Case 2: multiple barcodes detected
+    # Compute Levenshtein distance between the major barcode
+    # and all secondary barcodes
+     
+      Leven_intra <- stringdistmatrix(
+      a = DRAG_All$R1_seq_filter[[k]][1],
+      b = DRAG_All$R1_seq_filter[[k]][-1],
+      useNames = TRUE,
+      method = "lv",
+      weight = c(
+        d = 1,
+        i = 1,
+        s = 0.1,
+        t = 1
+      )
+    ) %>%
+      reshape2::melt()
+    
+# Case 2.1:
+    # All barcode variants are within the Levenshtein distance threshold.
+    # They are considered PCR-derived variants of the same original barcode.
+      
+      if( sum(Leven_intra$value > thr_Lv & 
+              Leven_intra$value != 0)==0){
+        
+        # If one barcode is clearly dominant, keep it as reference
+        
+            if (DRAG_All$R1_count_filter[[k]][1] != DRAG_All$R1_count_filter[[k]][2]) {
+            
+              selected_bcm <- which(DRAG_All$R1_count_filter[[k]] %>% unlist
+                                    == max(DRAG_All$R1_count_filter[[k]] %>% unlist ) )
+        
+              # Keep the dominant barcode sequence
+              DRAG_All$R1seq_filter_percell[[k]] =  
+                    DRAG_All$R1_seq_filter[[k]][selected_bcm]
+              # Merge counts from all related barcode variantss
+               DRAG_All$R1counts_filter_percell[[k]] = 
+                    DRAG_All$R1_count_filter[[k]] %>% unlist %>% sum
+
+        # If no dominant barcode exists, randomly select one reference sequence since all variants are highly similar
+               
+            }else{
+              selected_bcm <- sample(1:length(DRAG_All$R1_count_filter[[k]]), size = 1)
+               DRAG_All$R1seq_filter_percell[[k]] =  
+                    DRAG_All$R1_seq_filter[[k]][selected_bcm]
+               DRAG_All$R1counts_filter_percell[[k]] = 
+                    DRAG_All$R1_count_filter[[k]] %>% unlist %>% sum
+            }
+      
+# Case 2.2:
+    # Some barcode variants are distant, but the major barcode is strongly
+    # enriched compared to minor variants.
+    # Only close variants are merged.
+
+      }else if(
+        sum(Leven_intra$value > thr_Lv
+            & Leven_intra$value != 0) !=0 &
+               (DRAG_All$R1_count_filter[[k]][1] / sum(DRAG_All$R1_count_filter[[k]][-1])) >= thr_FC
+        ){
+#Keep the dominant barcode sequence, Merge counts from all related barcode variants
+        selected_id <- which(Leven_intra$value <= thr_Lv)
+        
+        DRAG_All$R1seq_filter_percell[[k]] = DRAG_All$R1_seq_filter[[k]][1]
+        DRAG_All$R1counts_filter_percell[[k]] = DRAG_All$R1_count_filter[[k]][selected_id] %>% unlist %>% sum
+        
+# Case 2.3:
+    # Ambiguous barcode assignment.
+    # Barcode is discarded.
+        
+      }else{ 
+        DRAG_All$R1seq_filter_percell[[k]] = "uncertain"
+        DRAG_All$R1counts_filter_percell[[k]] = "uncertain"
+      }
+    }
+}
+
+
+```
+
+
+
+The same PCR-error correction strategy was applied independently to R2 barcodes.
+The same Levenshtein distance and abundance ratio thresholds were used.
+```{r}
+DRAG_All$R2seq_filter_percell <- rep(NA, nrow(DRAG_All))
+DRAG_All$R2counts_filter_percell <- rep(NA, nrow(DRAG_All))
+
+for (k in 1:nrow(DRAG_All)) {
+  
+  if(length(DRAG_All$R2_seq_filter[[k]]) <= 1){
+    DRAG_All$R2seq_filter_percell[[k]] = DRAG_All$R2_seq_filter[[k]]
+
+    
+    if ( DRAG_All$R2_count_filter[[k]] %>% length > 0) {
+      DRAG_All$R2counts_filter_percell[[k]] =
+        DRAG_All$R2_count_filter[[k]]}else{
+          DRAG_All$R2counts_filter_percell[[k]]  = NA}
+    
+    }else{
+   
+      Leven_intra <- stringdistmatrix( a = DRAG_All$R2_seq_filter[[k]][1], 
+                                       b = DRAG_All$R2_seq_filter[[k]][-1], useNames = T,
+                      method='lv', weight = c(d = 1, i = 1, s = 1, t = 1))  %>% reshape2::melt()
+    
+      if( sum(Leven_intra$value > thr_Lv & Leven_intra$value != 0)==0){
+            if (DRAG_All$R2_count_filter[[k]][1] != DRAG_All$R2_count_filter[[k]][2]) {
+            
+              selected_bcm <- which(DRAG_All$R2_count_filter[[k]] %>% unlist == DRAG_All$R2_count_filter[[k]] %>% unlist %>% max() )
+        
+               DRAG_All$R2seq_filter_percell[[k]] =  
+                    DRAG_All$R2_seq_filter[[k]][selected_bcm]
+               DRAG_All$R2counts_filter_percell[[k]] = 
+                    DRAG_All$R2_count_filter[[k]] %>% unlist %>% sum
+            }else{
+              selected_bcm <- sample(1:length(DRAG_All$R2_count_filter[[k]]), size = 1)
+               DRAG_All$R2seq_filter_percell[[k]] =  
+                    DRAG_All$R2_seq_filter[[k]][selected_bcm]
+               DRAG_All$R2counts_filter_percell[[k]] = 
+                    DRAG_All$R2_count_filter[[k]] %>% unlist %>% sum
+            }
+      
+      }else if(sum(Leven_intra$value > thr_Lv & Leven_intra$value != 0) !=0 &
+               (DRAG_All$R2_count_filter[[k]][1] / sum(DRAG_All$R2_count_filter[[k]][-1]) ) >= thr_FC){
+        
+        selected_id <- which(Leven_intra$value <= thr_Lv)
+        
+        DRAG_All$R2seq_filter_percell[[k]] = DRAG_All$R2_seq_filter[[k]][1]
+        DRAG_All$R2counts_filter_percell[[k]] = DRAG_All$R2_count_filter[[k]][selected_id] %>% unlist %>% sum
+        
+      }else{ 
+        DRAG_All$R2seq_filter_percell[[k]] = "uncertain"
+        DRAG_All$R2counts_filter_percell[[k]] = "uncertain"
+      }
+    }
+}
+```
+
+
+
+```{r}
+# Convert corrected barcode counts to numeric format
+DRAG_All$R1counts_filter_percell <- as.numeric(DRAG_All$R1counts_filter_percell)
+DRAG_All$R2counts_filter_percell <- as.numeric(DRAG_All$R2counts_filter_percell)
+
+# Quantify the number of unresolved barcode assignments after correction
+idx2 <- which( DRAG_All$R1seq_filter_percell ==  "uncertain") 
+idx2%>% length ## Number of cells for which barcode correction failed: 4
+
+```
+
+## By cell, combine read1 and read2 barcode information
+
+```{r}
+### Validate barcode concordance between R1 and R2
+
+# Load Biostrings to compute reverse complements of R2 barcode sequences.
+library(Biostrings)
+
+DRAG_All$R1seq_filter_percell[2] %>% DNAString(); 
+DRAG_All$R2seq_filter_percell[2] %>% DNAString() %>% reverseComplement()
+
+```
+
+
+
+```{r}
+# Summarize the proportion of cells with concordant R1 and R2 barcode sequences.
+res = rep(NA, nrow(DRAG_All))
+for (k in 1:nrow(DRAG_All)) {
+  if(is.na(DRAG_All$R1seq_filter_percell[k]) == F &
+     DRAG_All$R1seq_filter_percell[k] != "uncertain" & 
+     is.na(DRAG_All$R2seq_filter_percell[k]) == F & 
+     DRAG_All$R2seq_filter_percell[k] != "uncertain" 
+     ){
+    if (length(DNAString(DRAG_All$R1seq_filter_percell[k])) > 3) {
+      
+    
+    res[k] =  reverseComplement(DNAString( DRAG_All$R2seq_filter_percell[k]) )== DNAString( DRAG_All$R1seq_filter_percell[k] )
+  }}else{res[k] = NA}
+}
+sum(res, na.rm = T) / length(na.omit(res)) * 100 # 99.5519% R1 == R2
+
+
+
+#plot
+data.frame(NBCM = c(sum(res, na.rm = T),length(na.omit(res)) ),
+                 type = factor(c("R2 == R1", "All"),
+                               levels = c( "R2 == R1","All" )) ,
+                 x = c(1, 1)) %>%
+  mutate(freq = NBCM / length(na.omit(res)) * 100) %>%
+
+ggplot(aes(x = type,  y=freq, fill=type) ) +
+  geom_bar(position = "stack", stat="identity", color = "black")+
+  geom_text(aes(y=freq+10, label=NBCM), vjust=1,  color="black", size=3.5)+
+  scale_y_continuous(limits = c(0,120))+
+  theme_classic()
+```
+
+
+```{r}
+### Rescue barcode assignments using R2
+
+# For cells lacking a confident R1 barcode but containing a confident R2 barcode, recover the barcode sequence from the reverse-complemented R2 read. Otherwise, retain the R1 barcode assignment.
+
+FUN_revComp_R1 <- function(X){
+  
+  R1 = X$R1seq_filter_percell
+  R2 = X$R2seq_filter_percell
+  res = c()
+  
+  if (is.na(R1) == T & is.na(R2) ==F & R2 != "uncertain") {
+    res = R2 %>% DNAString() %>% reverseComplement() %>% as.character 
+    
+  }else if (is.na(R1) == F) {
+    res = R1
+    
+  }else{
+    res = c(NA)
+  }
+  
+  res
+}
+
+DRAG_All$BCM_seq_noLV_beforeFilterMultipleMouse <- rep(NA, nrow(DRAG_All))
+
+DRAG_All$BCM_seq_noLV_beforeFilterMultipleMouse <- apply(DRAG_All, 1, FUN_revComp_R1) %>% unlist
+
+# Number of additional cells rescued by using R2 information.
+sum(is.na(DRAG_All$R1seq_filter_percell)) - sum(is.na(DRAG_All$BCM_seq_noLV_beforeFilterMultipleMouse))
+#88 saved!
+```
+
+
+```{r}
+### Characterize rescued barcode detections
+
+# Identify cells rescued exclusively from R2 and compare their barcode read counts with all other detected barcodes.
+
+id_R2 <- which(is.na(DRAG_All$BCM_seq_noLV_beforeFilterMultipleMouse) ==F & is.na(unlist(DRAG_All$R1seq_filter_percell)) == T) %>% as.vector()
+
+dt <- data.frame(counts = c(as.vector(DRAG_All$R2counts_filter_percell)[id_R2],
+                            as.vector(DRAG_All$R2counts_filter_percell)[-id_R2]),
+                 count_tot = c(as.vector(DRAG_All$nCount_RNA)[id_R2],
+                            as.vector(DRAG_All$nCount_RNA)[-id_R2]),
+                 type = c(rep("saveR2", length(id_R2)),
+                          rep("other", c(length(DRAG_All$R2counts_filter_percell) - length(id_R2)))),
+                 mouse = as.factor(c( DRAG_All$Group[id_R2],
+                            DRAG_All$Group[-id_R2])) )
+
+ggplot(data = dt[-which(is.na(dt$counts)==T),], 
+       aes(x = mouse, y = counts+1, fill = type))+
+  geom_boxplot(outlier.size = 0)+
+  geom_point(shape = 21, position = position_jitterdodge(), 
+              alpha = 0.6)+
+  geom_hline(yintercept = c(1,4))+
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)), limits = c(1, 2*10^3))+
+  theme_classic()+ 
+  theme(legend.position = "right") +
+  scale_fill_manual(values = (colorRampPalette(brewer.pal(8, "Spectral"))(2)[c(2,1)]))
+
+# Compare total coverage between rescued cells and all other barcode-positive cells.
+ggplot(data = dt[-which(is.na(dt$counts)==T),], 
+       aes(x = mouse, y = count_tot+1, fill = type))+
+  geom_boxplot(outlier.size = 0)+
+  geom_point(shape = 21, position = position_jitterdodge(), 
+              alpha = 0.6)+
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)), limits = c(1, 2*10^4))+
+  theme_classic()+ 
+  theme(legend.position = "right") +
+  scale_fill_manual(values = (colorRampPalette(brewer.pal(8, "Spectral"))(2)[c(2,1)]))
+
+# Compare barcode read depth between rescued and non-rescued cells.
+ggplot(data = dt[-which(is.na(dt$counts)==T),], 
+       aes(x = type, y = counts+1, fill = type))+
+  geom_boxplot(outlier.size = 0, notch = T)+
+  geom_point(shape = 21, position = position_jitterdodge(jitter.width = 0.1), 
+              alpha = 0.6)+
+  scale_x_discrete(limits = c( "other", "saveR2"))+
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)), limits = c(1, 2*10^3))+
+  theme_classic()+ 
+  theme(legend.position = "none") +
+  scale_fill_manual(values = (colorRampPalette(brewer.pal(8, "Spectral"))(2)[c(2,1)]))
+```
+
+
+```{r}
+### Merge barcode read counts
+
+# Combine R1 and R2 barcode read counts into a single per-cell
+# barcode abundance measure.
+
+DRAG_All$BCM_counts_noLV_beforeFilterMultipleMouse <- apply(
+  DRAG_All, 
+  1, 
+  function(X){
+  sum(c(X$R1counts_filter_percell  , 
+        X$R2counts_filter_percell), 
+      na.rm = T )
+    }
+  )
+
+head(DRAG_All$BCM_counts_noLV_beforeFilterMultipleMouse )
+```
+
+
+
+
+##QC3 - Remove shared bcm1 bw mive
+
+```{r}
+### Identify recurrent lineage barcodes across mice
+
+# Compile the list of unique lineage barcodes detected in each mouse,
+# remove missing and ambiguous barcode assignments, 
+# and identify barcodes observed in more than one mouse (blacklist).
+
+List_bcm = by(DRAG_All$BCM_seq_noLV_beforeFilterMultipleMouse, DRAG_All$MouseNumber, unique)
+
+List_bcm <- lapply(List_bcm, function(x){x[!is.na(x)]}) #remove NA
+List_bcm <- lapply(List_bcm, function(x){x[which(x %in% c("tooClose", "uncertain")==F)]}) #remove NA
+List_bcm <- unlist(List_bcm)
+Blacklist <- List_bcm[duplicated(List_bcm)]
+
+length(Blacklist) #136 - 38%
+length(Blacklist) / DRAG_All$BCM_seq_noLV_beforeFilterMultipleMouse %>% unique %>% length() * 100
+
+```
+
+
+```{r}
+### Remove recurrent barcode assignments
+
+# Remove recurrent (blacklisted) and uncertain barcode assignments,
+# together with their associated barcode read counts.
+
+DRAG_All$BCM_STRINGEANT <- DRAG_All$BCM_seq_noLV_beforeFilterMultipleMouse
+
+id <- which(DRAG_All$BCM_STRINGEANT %in% c("uncertain", Blacklist))
+DRAG_All$BCM_STRINGEANT[id] <- NA
+
+DRAG_All$BCM_counts <- DRAG_All$BCM_counts_noLV_beforeFilterMultipleMouse
+DRAG_All$BCM_counts[id] <- NA
+```
+
+
+```{r}
+### Generate the final filtered barcode annotation : Store the final filtered lineage barcode annotation for downstream analyses.
+DRAG_All$Barcode <- DRAG_All$BCM_STRINGEANT
+```
+
+```{r}
+### Compute clone size
+
+# Calculate clone size as the number of cells carrying each lineage
+# barcode before and after recurrent barcode filtering.
+
+# Clone size before filtering
+taille <- table(DRAG_All$BCM_seq_noLV_beforeFilterMultipleMouse)
+DRAG_All$BCM_CloneSize_noLV <- taille[DRAG_All$BCM_seq_noLV_beforeFilterMultipleMouse]
+
+# Clone size after filtering
+taille <- table(DRAG_All$BCM_STRINGEANT)
+DRAG_All$BCM_CloneSize_STRINGEANT <- taille[DRAG_All$BCM_STRINGEANT]
+```
+
+
+```{r}
+### Characterize recurrent barcodes
+
+# Compare the clone sizes of recurrent (blacklisted) barcodes
+# with those of retained lineage barcodes.
+
+id <- which(DRAG_All$BCM_seq_noLV_beforeFilterMultipleMouse %in% c( "uncertain", Blacklist))
+
+dt <- data.frame(size = c(as.vector(DRAG_All$BCM_CloneSize_noLV)[id],
+                            as.vector(DRAG_All$BCM_CloneSize_noLV)[-id]),
+                 type = c(rep("Blacklist", 
+                              length(id)),
+                          rep("other", 
+                              c( length( DRAG_All$BCM_seq_noLV_beforeFilterMultipleMouse ) - length( id )
+                                 )
+                              )
+                          ),
+                 mouse = as.factor(c( DRAG_All$Group[id],
+                            DRAG_All$Group[-id])) 
+                 )
+
+ggplot(data = dt, 
+       aes(x = mouse, y = (size), fill = type))+
+  geom_boxplot(outlier.size = 0)+
+  geom_point(shape = 21, position = position_jitterdodge(), 
+              alpha = 0.6)+
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))+
+  theme_classic()+ 
+  scale_fill_manual(values = (colorRampPalette(brewer.pal(8, "Spectral"))(2)))
+```
+
+
+
+
+
+
+## QC4 - Add Pgen
+
+
+```{r}
+# Add the full barcode sequence used for Pgen estimation by concatenating:
+# - the constant 5' and 3' flanking regions of the DRAG barcode
+# - the variable barcode sequence
+# Then retrieve the corresponding Pgen value from the reference Pgen table.
+
+DRAG_All <- DRAG_All %>%
+  mutate(Barcode_long = paste0(
+    toupper("acctcctcgaggtcatcgaagtatcaagtcca"), # 5' constant region
+    BCM_seq_noLV_beforeFilterMultipleMouse,                                     # variable barcode sequence
+    toupper("accgtagcaagctcgagagtagac")          # 3' constant region
+                             )
+    ) %>%
+  
+  # Add Pgen values by matching the reconstructed barcode sequence
+  # with the reference table containing barcode sequences and their generation probabilities.
+  left_join(
+    Pgen_table %>% 
+      dplyr::select(sequence, Pgen) %>% 
+      distinct(),
+    by = c("Barcode_long" = "sequence")
+  ) 
+head(DRAG_All, 15)
+
+```
+
+
+
+
+# FIGURES
+
+
+## Pgen vs Nmice
+```{r}
+
+# Compute the number of distinct mice in which each barcode is detected.
+# This allows assessing whether recurrent/shared barcodes are enriched
+# among barcodes with high probability of generation (high Pgen).
+
+# Count the number of distinct mice in which each barcode is detected.
+
+DRAG_All <- DRAG_All %>%
+  ungroup() %>% 
+  group_by(BCM_seq_noLV_beforeFilterMultipleMouse) %>%
+  mutate(Barcode_sharing_mice_N = n_distinct(MouseNumber))
+
+
+# Summarize one entry per barcode and classify barcodes according
+# to the number of mice in which they are detected.
+
+df <-DRAG_All %>%
+  dplyr::filter(!is.nan(Pgen),!is.na(Pgen),  is.finite(Pgen)) %>%  
+  ungroup() %>% 
+  group_by(BCM_seq_noLV_beforeFilterMultipleMouse) %>%
+  summarise(
+    Pgen = dplyr::first(Pgen),
+    Barcode_sharing_mice_N = max(Barcode_sharing_mice_N),
+    .groups = "drop"
+  ) 
+
+# Define a grid of Pgen thresholds (10^-x).
+thr_grid <- seq(0, 11, by = 0.5)
+
+# For each threshold, calculate the fraction of barcodes
+# shared by more than one mouse.
+
+res <- lapply(thr_grid, function(x){
+
+  thr <- 10^-x
+
+  sub <- df %>% dplyr::filter(Pgen <= thr)
+
+  if(nrow(sub) == 0){
+    return(data.frame(x = x, frac = NA))
+  }
+
+  frac_shared <- mean(sub$Barcode_sharing_mice_N > 1)
+
+  data.frame(
+    x = x,
+    frac = frac_shared
+  )
+
+}) %>% bind_rows()
+
+# Record the number of retained barcodes at each threshold.
+res$n <- sapply(thr_grid, function(x){
+  sum(df$Pgen <= 10^-x)
+})
+
+
+
+# Plot the fraction of shared barcodes as a function of the Pgen threshold.
+ggplot(res, aes(x = x, y = frac)) +
+  geom_point(size = 3, shape = 21) +
+  geom_text(aes(label = n), vjust = -1, size = 3)+
+  labs(
+    x = expression("Pgen threshold 10"^-x),
+    y = "Fraction barcode shared between mice"
+  ) +
+  theme_classic()
+```
+
+
+
+```{r}
+# Classify samples according to whether they correspond to pooled glands
+# or individual gland-level samples.
+DRAG_All <- DRAG_All %>%
+  mutate(type_gl = case_when(WhichGland %in% c("AllGl.Pooled", "All") ~"AllGl.Pooled",
+                             TRUE ~"Mono.Gl"))
+```
+
+```{r}
+DRAG_All %>%
+  filter(!is.na(BCM_STRINGEANT)) %>% filter(Group != "CreN") %>%
+  group_by(SampleBio, type_gl) %>%
+  mutate(
+    n_barcodes_sample = n_distinct(BCM_STRINGEANT),
+    .groups = "drop"
+  ) %>% ungroup() %>%
+  group_by(type_gl) %>%
+  summarize(
+         mean = mean(n_barcodes_sample))
+```
+Average number of detected clones per sample and gland type
+```{r}
+# Calculate the average number of distinct barcodes (clones)
+# detected per sample for each gland processing strategy.
+# CreN control samples are excluded.
+
+DRAG_All %>%
+  filter(!is.na(BCM_STRINGEANT)) %>% filter(Group != "CreN") %>%
+  group_by(Group) %>%
+  summarize(
+    n_barcodes_sample = n_distinct(BCM_STRINGEANT),
+    .groups = "drop"
+  ) 
+
+```
+
+Clone number comparison between samples and groups
+
+
+```{r}
+# Calculate:
+# - number of distinct clones detected in each biological sample
+# - average clone number within each experimental group and gland type
+
+
+df_nclone <- DRAG_All %>%
+  filter( !is.na(BCM_STRINGEANT)) %>%
+  
+  group_by(SampleBio, Group, type_gl) %>%
+  mutate(
+    n_barcodes_sample = n_distinct(BCM_STRINGEANT),
+    .groups = "drop"
+  )%>% ungroup() %>%
+  
+    # Compute the mean number of clones for each group and gland type
+  group_by( Group, type_gl) %>%
+  mutate(
+    n_barcodes_group = mean(n_barcodes_sample),
+    .groups = "drop"
+  )%>%
+  
+  select(Group, 
+         SampleBio, 
+         n_barcodes_group, 
+         n_barcodes_sample , 
+         type_gl) %>% 
+  distinct()
+
+
+df_nclone %>%
+  filter(type_gl=="Mono.Gl") %>%
+  filter(SampleBio %in% c("8415_G2-3", "8718_D2-3", "8964_G4")) %>%
+ggplot( aes(x = Group, y = n_barcodes_group, fill = Group)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+    geom_point(aes(y =n_barcodes_sample), 
+             shape = 21,  position = position_jitter()) +
+  theme_classic() +
+  labs(y = "Number of distinct barcodes",
+       x = "Sample")
+```
+
+
+
+
+
+
+
+
+
+
+
+##  Summary barplots: barcode recovery and clone complexity metrics
+```{r}
+# Create a unique biological sample identifier by combining:
+# - mouse identifier
+# - gland identifier
+DRAG_All$SampleBio <- paste0(DRAG_All$MouseNumber, "_", DRAG_All$WhichGland)
+
+# Manually replace missing mouse identifier for one sample
+DRAG_All$SampleBio[which(DRAG_All$SampleBio  == "NA_G2-3")] <- "8415_G2-3"
+
+
+
+## Barcode detection rate before QC3
+
+# Calculate the percentage of cells containing a detected BCM barcode
+# before removal of barcodes shared between multiple mice (QC3).
+#
+# For each biological sample:
+# - numerator: number of cells assigned to a barcode
+# - denominator: total number of cells
+
+res = table(
+  DRAG_All$BCM_seq_noLV_beforeFilterMultipleMouse,
+  DRAG_All$SampleBio) %>% 
+  colSums() / 
+  table(DRAG_All$SampleBio) *
+  100 %>% 
+  round(., 0)
+
+
+# Build summary dataframe containing:
+# - total number of cells
+# - number of cells with barcode detection
+# - barcode recovery frequency
+# - gland processing type
+# - experimental group
+
+dt <- data.frame(
+  Ncell = colSums(table(
+  DRAG_All$BCM_seq_noLV_beforeFilterMultipleMouse, 
+  DRAG_All$SampleBio
+  ))  ,
+  Ncell_wBCM = table(DRAG_All$SampleBio) ,
+  frequency = res,
+  glandType = c("Mix", "Mix", "Mix",
+                              "Mono", "Mono", "Mono","Mono", "Mono", 
+                              "Mix", "Mix",
+                              "Mono", "Mono", "Mono", "Mix", "Mix", NA, NA),
+  group = c("CreP_Late", "CreP_Early", "CreP_Early",
+                          "CreP_Late", "CreP_Late", "CreP_Late", "CreP_Late","CreP_Late",
+                          "CreN","CreN",
+                          "CreP_Early","CreP_Early", "CreP_Early",
+                          "CreN",  "CreN","CreN","NA"))
+by(dt$Ncell, dt$group, sum)
+
+
+# Compute mean barcode recovery rate per experimental group
+dt <- dt %>% 
+  group_by(group ) %>%
+  mutate(mean = mean(frequency.Freq))
+
+# Plot barcode detection rate before QC3
+# Dots represent individual samples
+# Dot size represents the number of analyzed cells
+
+g1 <- ggplot(dt, aes(x = group, y = frequency.Freq, fill = group))+
+  geom_bar(aes(y = mean), position="identity", stat="identity", color = "black")+
+  scale_y_continuous(limits = c(0,100))+
+  geom_point(aes(size = Ncell), 
+             shape =21, position = position_jitter(width = 0.2))+
+  geom_text(aes(y=frequency.Freq, label=Ncell), vjust=1.6,  color="black", size=3.5,
+            position = position_jitter(width = 0.2,height = 0))+
+  theme_classic()
+```
+
+
+```{r}
+# Calculate barcode recovery after QC filtering.
+# Only barcodes retained after QC are considered (BCM_STRINGEANT).
+
+
+res = table(
+  DRAG_All$BCM_STRINGEANT, 
+  DRAG_All$SampleBio) %>% 
+  colSums() / 
+  table(DRAG_All$SampleBio) *
+  100 %>% 
+  round(., 0)
+
+dt <- data.frame(Ncell = colSums(table(
+  DRAG_All$BCM_STRINGEANT, 
+  DRAG_All$SampleBio))  ,
+                 Ncell_wBCM = table(DRAG_All$SampleBio) ,
+                 frequency = res,
+                glandType = c("Mix", "Mix", "Mix",
+                              "Mono", "Mono", "Mono","Mono", "Mono", 
+                              "Mix", "Mix",
+                              "Mono", "Mono", "Mono", "Mix", "Mix", NA, NA),
+                group = c("CreP_Late", "CreP_Early", "CreP_Early",
+                          "CreP_Late", "CreP_Late", "CreP_Late", "CreP_Late","CreP_Late",
+                          "CreN","CreN",
+                          "CreP_Early","CreP_Early", "CreP_Early",
+                          "CreN",  "CreN","CreN","NA"))
+by(dt$Ncell, dt$group, sum)
+
+dt <- dt %>% 
+  group_by(group ) %>%
+  mutate(mean = mean(frequency.Freq))
+
+
+g2 <- ggplot(dt, aes(x = group, y = frequency.Freq, fill = group))+
+  geom_bar(aes(y = mean), position="identity", stat="identity", color = "black")+
+  scale_y_continuous(limits = c(0,100))+
+  geom_point(aes(size = Ncell), 
+             shape =21, position = position_jitter(width = 0.2))+
+  geom_text(aes(y=frequency.Freq, label=Ncell), vjust=1.6,  color="black", size=3.5,
+            position = position_jitter(width = 0.2,height = 0))+
+  theme_classic()
+
+# Compare barcode recovery before and after QC
+grid.arrange(g1, g2, ncol = 2)
+```
+
+
+
+#SAVE
+```{r}
+qs::qsave(DRAG_All,
+          paste0(outputDir, "sc_Metadata_withAllDRAG_filt.qs"))
+
+```
+
+
+
+
+

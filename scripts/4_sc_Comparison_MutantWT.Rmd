@@ -1,0 +1,1114 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+# Introduction
+
+```{r}
+# -------------------------------------------------------------- 
+# Libraries
+# --------------------------------------------------------------
+library(Seurat) ; library(Signac)
+library(Matrix) ; library(uwot)
+
+library(msigdbr) ; library(clusterProfiler)
+
+library(dplyr)
+
+library(ggplot2)
+library(ggforce)
+library(ggrepel)
+library(gridExtra)
+
+# -------------------------------------------------------------- 
+# Color definition
+# --------------------------------------------------------------
+Bin_colors <- c(
+  "Bin_MP3"  = "#fdea44",  
+  "Bin_MP4"  = "#a7d066", 
+  "Bin_MP7"  = "#e9407b",  
+  "Bin_MP9"  = "#d3e44c",  
+  "Bin_MP10" = "#b16680",  
+  "Bin_MP12" = "#973356",  
+  "Bin_MP14" = "#3f0418",  
+  "Bin_MP15" = "#f9e8cc",  
+  "Bin_MP16" = "#6c9d1e",  
+  "No_MP"    = "grey95" 
+)
+
+state_colors <- c(
+  "Basal fate"                     = "#236ec4", 
+  "Alveolar fate"                  = "#F7DCAD",  
+  "AP1 activation"                 = "#fdea44",  
+  "Angiogenic remodeling"          = "#a7d066", 
+  "Inflammatory cytokines"         = "#e9407b",  
+  "Mechanostransduction"           = "#d3e44c",  
+  "Stress survival"                = "#b16680",  
+  "Mitochondrial-stress response"  = "#973356",  
+  "Genome maintenance"             = "#3f0418",  
+  "Primed Alveolar"                = "#f9e8cc",  
+  "EMT / plasticity"               = "#6c9d1e",  
+  "Unknown"                        = "grey95"   
+)
+
+
+
+cols_fate <- c("basal"  = "#236ec4", 
+               "LP"     = "#a01858",      
+               "HS"     = "#f9c40c",  
+               "Alv"    = "#F7DCAD")
+
+
+cols_Group <- c("CreP_EARLY" = "#C0D69F",  
+                "CreP_LATE"  = "#61980E",
+                "CreN_LP"    = "#a01858")
+
+cols_MonoGland <- c("8415_G2-3" = "#375708",  
+                    "8718_D2-3"     = "#61980E",
+                    "8964_G4"       = "#C0D69F")
+```
+
+
+```{r}
+Output_Dir <- "C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/sc_MutantvsWT"
+
+# Load sc RNA & Multiome
+
+seurat_rna <- qs::qread(file.path("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/seurat_rna_step7_new.qs"))
+
+seurat <- qs::qread(file.path("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/seurat_step5_new.qs"))
+
+```
+
+# scRNA
+
+## Fig. 3b - Violin - Median cell cell transcriptomic correlation 
+
+```{r}
+# ============================================================
+# Median cell–cell transcriptomic correlation
+# ============================================================
+
+# Extract raw RNA count matrix
+expr <- GetAssayData(seurat_rna,assay = "RNA_umi", slot = "counts")
+
+# Retrieve cell metadata
+meta <- seurat_rna@meta.data
+
+#Define cell groups
+groups_list <- list(
+  CreN_LP = rownames(meta %>% filter(Group == "CreN" & annot_rna_joint_alv == "LP")),
+  CreP_EARLY = rownames(meta %>% filter(Group == "CreP_EARLY")),
+  CreP_LATE = rownames(meta %>% filter(Group == "CreP_LATE"))
+)
+
+
+# ------------------------------------------------------------
+# Compute median cell–cell transcriptomic correlation
+# ------------------------------------------------------------
+calc_cell_corr <- function(cells, expr, label) {
+
+# Subset expression matrix to selected cells
+  mat <- expr[, cells, drop = FALSE]
+  mat_dense <- as.matrix((mat))
+  
+  # Remove genes with zero variance
+  keep <- apply(mat_dense, 1, sd) > 0
+  mat_dense <- mat_dense[keep, ]
+
+  #ship group with fewer than two cells
+  if (ncol(mat_dense) < 2) {
+    return(NULL) }
+
+   # Compute Pearson correlation matrix between cells
+  corr_mat <- cor(mat_dense, method = "pearson")
+
+  # Compute the median correlation for each cell,
+  # excluding self-correlation (diagonal)
+    med_corr <- apply(corr_mat, 2, function(x) {
+    median(x[x < 0.9999], na.rm = TRUE)
+  })
+
+  tibble(
+    cell = names(med_corr),
+    corr_score = med_corr,
+    group = label
+  )
+}
+
+# Compute correlation scores for each group
+corr_df_solo <- bind_rows(
+  calc_cell_corr(groups_list$CreN_LP, expr, "CreN_LP"),
+  calc_cell_corr(groups_list$CreP_EARLY, expr, "CreP_EARLY"),
+  calc_cell_corr(groups_list$CreP_LATE, expr, "CreP_LATE")
+)
+
+
+# ------------------------------------------------------------
+# Visualize median cell–cell correlation
+# ------------------------------------------------------------
+ggplot(corr_df_solo, aes(group, corr_score, fill = group)) +
+  geom_violin(trim = T, alpha = 1) +
+  geom_boxplot(outliers = F, width = 0.2)+
+  scale_fill_manual(values = cols_Group)+
+  theme_classic() +
+  labs(
+    x = "",
+    y = "Median cell–cell correlation"  ) +
+  guides(fill = "none")
+
+```
+
+```{r}
+# ------------------------------------------------------------
+# Statistical analysis
+# One-way ANOVA followed by Tukey's post hoc test
+# ------------------------------------------------------------
+
+anova_model <- aov(corr_score ~ group, 
+                   data = corr_df_solo)
+summary(anova_model)
+
+tukey_res <- TukeyHSD(anova_model)
+tukey_res
+```
+
+
+## Definition of discordant or transitory states 
+```{r}
+# ============================================================
+# Definition of discordant or transitory cell states
+# ============================================================
+
+# Build annotation table combining lineage group, FACS identity, transcriptomic identity and epigenomic identity
+dt <- data.frame(
+                 Group_EL =seurat$Group,
+                 Mark = seurat$mark,
+                 FACS_ID =seurat$facs_phenotype,
+                 RNA_ID = seurat$annot_rna_joint_alv,
+                 Epi_ID = seurat$condition_k4_detailed)
+
+
+dt <- dt %>%
+  # Complete H3K4me1 annotations using H3K27me3-based annotations
+  mutate(Epi_ID = case_when(is.na(Epi_ID) == T & 
+                              is.na(seurat$condition_k27_broad)==F ~seurat$condition_k27_detailed,
+                            TRUE ~Epi_ID )) %>%
+    # Rename control group
+  mutate(Group_EL = case_when(Group_EL == "Rosa" ~ "CreN",
+                              TRUE ~ Group_EL))
+
+
+# Simplify & homogeneise epigenomic annotation names
+dt$Epi_ID <- gsub(".*_", "", dt$Epi_ID)
+dt <- dt %>%
+     mutate(Epi_ID = case_when(Epi_ID == "lp" ~ "LP",
+                               Epi_ID == "hs" ~ "HS",
+                               TRUE ~Epi_ID) ) 
+
+# Remove cells without multiomic annotation
+dt <- dt %>%
+  filter(!Epi_ID == "noomics")%>%
+  dplyr::filter(!is.na(FACS_ID), !is.na(RNA_ID), !is.na(Epi_ID))
+
+
+head(dt) ; tail(dt)
+```
+
+
+
+### Fig. 4g > To be replace by Anna's version (FACS vs. RNA | RNA vs. Epi)
+```{r}
+# ============================================================
+# Alluvial plot function
+# ============================================================
+
+
+# Define common ordering of cell identities across modalities
+levels_x <- c("basal", "luminal", "Alv",  "LP","HS")
+alpha <- 0.7
+
+make_alluvial <- function(df, title = "") {
+  
+    # Compute frequency of each annotation combination
+  df2 <- df %>%
+    group_by(RNA_ID, FACS_ID, Epi_ID) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    mutate(freq = n / sum(n) * 100) %>%
+    dplyr::select( FACS_ID,  RNA_ID, Epi_ID, freq) %>%
+    
+      # Convert data into ggforce parallel sets format
+    gather_set_data(1:3) %>%       
+    arrange(x,  FACS_ID, RNA_ID, Epi_ID) %>%
+    
+     # Keep consistent ordering of cell states
+    mutate(
+      FACS_ID = factor(FACS_ID, levels = levels_x),
+      RNA_ID  = factor(RNA_ID,  levels = levels_x),
+      Epi_ID  = factor(Epi_ID,  levels = levels_x),
+      y       = factor(y,       levels = levels_x)
+    )
+  
+    # Generate alluvial representation
+  ggplot(df2, aes(x = x, id = id, split = y, value = freq)) +
+    geom_parallel_sets(aes(fill = RNA_ID), alpha = alpha, axis.width = 0.3) +
+    geom_parallel_sets_axes(axis.width = 0.25, fill = "gray95",
+                            color = "gray80", size = 0.3) +
+    geom_parallel_sets_labels(colour = 'gray35', size = 4, angle = 0,
+                              fontface = "bold") +
+    theme_minimal() +
+    labs(title = title) +
+    theme(
+      legend.position = "none",
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.text.y = element_blank(),
+      axis.text.x = element_text(size = 18, face = "bold"),
+      axis.title.x = element_blank(),
+      plot.title = element_text(size = 20, face = "bold")
+    )
+}
+
+
+
+# ============================================================
+# Generate alluvial plots for each biological condition
+# ============================================================
+
+# Control cells with luminal progenitor RNA identity
+df_CreN_LP <- dt %>%
+  dplyr::filter(Group_EL == "CreN", RNA_ID == "LP")
+
+ggCreN <- make_alluvial(df_CreN_LP, title = "CreN — LP (RNA subset)")
+ggCreN
+
+
+# Early mutant cells
+df_CreP_Early <- dt %>%
+  dplyr::filter(Group_EL == "CreP_EARLY")
+
+ggCreP_e <- make_alluvial(df_CreP_Early, title = "CreP — Early")
+ggCreP_e
+
+
+# Late mutant cells
+df_CreP_Late <- dt %>%
+  dplyr::filter(Group_EL == "CreP_LATE")
+
+ggCreP_l <- make_alluvial(df_CreP_Late, title = "CreP — Late")
+ggCreP_l
+```
+
+
+```{r}
+# ============================================================
+#  Pie chart definition of concordant, discordant and specific cell states
+# ============================================================
+
+## Function to generate pie charts from FACS, RNA and epigenomic annotations
+
+make_pie_chart <- function(df, title = NULL, colors) {
+  
+  # Assign pie categories according to user-defined rules
+  df <- df %>%
+    mutate(pie_label = case_when(RNA_ID == "LP" & FACS_ID == "luminal" &  Epi_ID == "LP" ~ "Concordant",
+                               RNA_ID == "basal" & FACS_ID == "basal" &  Epi_ID == "basal" ~ "basal" ,
+                               RNA_ID == "Alv" &  FACS_ID == "luminal" &  Epi_ID == "LP" ~ "Alv" ,
+                               RNA_ID == "basal" & (FACS_ID != "basal" |  Epi_ID != "basal" )~ "Discordant" ,
+                               RNA_ID == "LP" & (FACS_ID != "luminal" |  Epi_ID != "LP" )~ "Discordant" ,
+                               RNA_ID == "Alv" & (FACS_ID != "luminal" |  Epi_ID != "LP" )~ "Discordant" ,
+                               TRUE ~ "Other"))
+  
+  # Compute fraction of cells in each category
+  df_pie <- df %>%
+    count(pie_label) %>%
+    mutate(freq = n / sum(n),
+           label = scales::percent(freq))
+  
+  # Generate donut plot
+  p <- ggplot(df_pie, aes(x = 2, y = freq, fill = pie_label)) +
+    geom_col(color = "white", width = 1) +
+    geom_text(aes(label = label),
+              position = position_stack(vjust = 0.5),
+              size = 5,
+              color = "white") +
+    coord_polar(theta = "y") +
+    xlim(0.5, 2.5) +
+    scale_fill_manual(values = colors) +
+    theme_void() +
+    theme(
+      legend.title = element_blank(),
+      plot.title = element_text(size = 18, face = "bold")
+    ) +
+    labs(title = title)
+  
+  return(p)
+}
+
+
+# Define pie colors
+pie_colors <- c(
+  "Concordant" = "#a01858",
+  "basal" = "#236ec4",
+  "Alv" = "#F7DCAD",
+  "HS" = "#f9c40c",
+  "Discordant" = "black",
+  "Other" = "grey80"
+)
+
+```
+
+```{r}
+p_CreN <- make_pie_chart(
+  df_CreN_LP,
+  title = "CreN LP",
+  colors = pie_colors)
+
+p_CreP_e <- make_pie_chart(
+  df_CreP_Early,
+  title = "CreP Early",
+  colors = pie_colors)
+
+p_CreP_l <- make_pie_chart(
+  df_CreP_Late,
+  title = "CreP Late",
+  colors = pie_colors)
+
+
+p_CreN
+p_CreP_e
+p_CreP_l
+```
+
+
+
+
+
+
+
+
+
+
+## Markers genes Basal Mutant 
+Comparison of mutant and wild-type basal populations, restricted to cellsshowing concordant annotation between FACS phenotype and RNA-based cell identity
+
+
+```{r}
+# ============================================================
+# Define coherent and discordant FACS/RNA annotations
+# ============================================================
+
+# Cells are considered coherent when FACS and transcriptomic annotations identify the same lineage compartment
+
+seurat_rna@meta.data <- seurat_rna@meta.data %>%
+  mutate(Annotation_Coherent_FACS_RNA = case_when(
+    facs_phenotype == "basal" & annot_rna_joint_alv == "basal" ~ "CoherentFACSRNA_basal",
+    facs_phenotype != "basal" & annot_rna_joint_alv != "basal" ~ "CoherentFACSRNA_Luminal",
+    is.na(facs_phenotype) ~ paste0("CoherentFACSRNA_", annot_rna_joint_alv),
+    TRUE ~ paste0("DicordandFACS_", facs_phenotype, "_RNA_", annot_rna_joint_alv))) 
+
+# Rename control group for consistency 
+seurat_rna@meta.data <- seurat_rna@meta.data %>%
+  mutate(Group = case_when(Group == "Rosa" ~ "CreN",
+                           TRUE ~ Group))
+
+# Create combined identity for differential expression analysis comparing mutant and control populations with matched annotations
+seurat_rna@meta.data$ID_DEGs <- paste0(
+  seurat_rna@meta.data$Group, "_",
+  seurat_rna@meta.data$Annotation_Coherent_FACS_RNA)
+
+# Check distribution of coherent/discordant populations across groups
+table(seurat_rna@meta.data $ID_DEGs)
+```
+```{r}
+# Visualize coherent and discordant populations on the integrated RNA UMAP
+DimPlot( seurat_rna , group.by = "Annotation_Coherent_FACS_RNA", reduction = "UMAP_spectral_rna_umi_harmony")
+
+```
+
+```{r}
+# ============================================================
+# Differential expression analysis between mutant and wild-type basal cells
+# ============================================================
+# restricted to cells with concordant FACS and RNA basal annotation
+
+res <- FindMarkers(seurat_rna ,
+                         group.by = "ID_DEGs", 
+                         ident.1 =c("CreP_LATE_CoherentFACSRNA_basal", 
+                                    "CreP_EARLY_CoherentFACSRNA_basal"), #104+12
+                         ident.2 = c("CreN_CoherentFACSRNA_basal"), #636
+                         test.use = 'wilcox_limma',
+                         only.pos = F,
+  recorrect_umi = FALSE)
+
+# Select significant differentially expressed genes
+signature <- subset(res, p_val_adj < 0.05)
+signature
+```
+
+
+
+
+
+### Fig. 5g - Volcano
+```{r}
+# ============================================================
+# Functional annotations of DEGs
+# ============================================================
+
+# Load published mammary epithelial cell signatures
+Signature_ID_CreN_10x <- read.delim("C:/Users/Marthe Laisne/Desktop/BI_references_signatures_annotations/Mammarygland_Signatures_Custom/SignatureCreN_scRNA10x_Epithelial_poles.txt")
+
+# Add alveolar signature from Chen et al., 2021
+LAlv_Chen2021  <- read.delim("C:/Users/Marthe Laisne/Desktop/BI_references_signatures_annotations/Mammarygland_Signatures_cellTypes/LAlv_Chen2021.txt")
+head(Signature_ID_CreN_10x) ; head(LAlv_Chen2021)
+
+DEG <- res
+
+# Define significant genes and direction of regulation
+DEG$signif <- DEG$p_val_adj < 0.05
+DEG$FC <- rep(NA, nrow(DEG))
+DEG$FC[which(DEG$avg_log2FC > 0 & DEG$signif ==TRUE)] = "UP"
+DEG$FC[which(DEG$avg_log2FC < 0 & DEG$signif ==TRUE)] = "DW"
+
+DEG$gene <- rownames(res)
+
+# Add biological annotations from reference signatures
+DEG <- DEG %>% 
+  left_join(Signature_ID_CreN_10x, by = c("gene" = "Gene")) %>%
+  mutate(Type = case_when(gene %in% LAlv_Chen2021$Spp1 ~ "Alv",
+                          is.na(Type) &  signif == TRUE ~ "Others",
+                          TRUE ~ Type))
+
+# Select top significant genes for volcano plot labeling
+label_g <- DEG %>% 
+    dplyr::filter(p_val_adj < 0.05) %>%
+    arrange(p_val_adj) %>% 
+    ungroup() %>%
+    group_by(FC) %>%   
+    slice_head(n = 10) %>%
+    ungroup() %>%
+    pull(gene)
+
+
+# ============================================================
+# Volcano plot highlighting differentially expressed signatures
+# ============================================================
+gg5 <- ggplot(DEG,
+       aes(x = (avg_log2FC), y = -log10(p_val_adj), fill = Type , size = signif, alpha = signif) )+
+  geom_point(shape = 21, colour = "black")+ 
+  geom_point(data = subset(DEG, signif == TRUE), 
+             shape = 21, colour = "black") +
+  geom_label_repel( data = subset(DEG, gene %in% label_g),
+                   aes(label = gene),  force = 10,  max.overlaps =100) +
+  
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") + 
+  geom_vline(xintercept = c(log2(0.5), log2(2)),linetype = "dashed") +
+  ggtitle("Mutant vs. WT")+
+  
+  scale_fill_manual(values = c("#F7DCAD",  "#236ec4",  "#a01858", "#f9c40c" ,  "grey80" )) +
+  scale_size_manual(values = c(2,2,1)) + 
+  scale_alpha_manual(values = c(0.5, 1,1)) +
+  scale_x_continuous(breaks = c(seq(-6, 6, 2)),       
+                     limits = c(-6, 6))  +
+  scale_y_continuous(limits = c(0,25))+
+  theme_bw() +
+  theme(panel.border = element_rect(colour = "black", fill = NA, size= 0.5),    
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank())
+gg5
+```
+### Ext Fig. 13e - Violin
+
+```{r}
+# ============================================================
+# Violins to visualize expression of selected basal and luminal marker genes
+# ============================================================
+
+VlnPlot(seurat_rna, group.by = "ID_DEGs",
+        features = c("Krt14", "Krt5","Acta2", "Myl9", 
+                     "Krt18", "Krt8","Csn3","Lgals3", "B2m"), pt.size = 0)&
+  scale_x_discrete(limits = c("CreN_CoherentFACSRNA_basal","CreP_LATE_CoherentFACSRNA_basal", " ",
+                              
+                               "CreP_LATE_CoherentFACSRNA_Luminal"))&
+  scale_fill_manual(values = c("#236ec4","#61980E", "#a01858",
+                               rep("grey", 17)))&
+  geom_pointrange(
+    stat = "summary",
+    fun.min = function(z) {quantile(z,0.25)},
+    fun.max = function(z) {quantile(z,0.75)},
+    fun = median )&
+  theme(axis.text.x = element_text(size = 8) )
+```
+
+
+# sc Multi
+
+
+##Generation of gene-level multi-omic feature space and UMAP visualization 
+ Objective:
+ Generate a gene-level multi-omic feature space by integrating:
+ - transcriptional signal (RNA expression)
+ - active chromatin signal (H3K4me1 gene activity)
+ - repressive chromatin signal (H3K27me3 gene activity)
+
+ Each observation corresponds to one gene.
+ The feature space is generated from cell-level multi-omic measurements, and genes are projected using PCA/UMAP.
+
+ Additional variables (not used for PCA/UMAP construction) are calculated to quantify gene activity/expression changes between CreN and CreP groups.
+
+
+```{r}
+# ============================================================
+# CreN LP + Mutant cells for FC
+# ============================================================
+
+#Retrieve metadat
+meta <- seurat@meta.data
+meta$rownames <- rownames(meta)
+
+
+# Extract multi-omic matrices
+rna_mat <- GetAssayData( seurat,  assay = "SCT_umi", layer = "counts" )
+
+h3k4me1_mat <- GetAssayData(  seurat, assay = "ga_h3k4me1")
+
+h3k27me3_mat <- GetAssayData(  seurat, assay = "ga_h3k27me3")
+
+
+# Select cells of interest:
+# - CreN LP cells (control luminal population)
+# - CreP early and late pre-tumoral populations
+cells_keep <- meta %>%
+  dplyr::filter(
+    (Group == "CreN" & annot_rna_joint_alv == "LP") |
+    (Group %in% c("CreP_EARLY", "CreP_LATE"))  ) 
+
+# Keep only cells present in all three modalities
+cells_use <- intersect(  colnames(rna_mat),  union(colnames(h3k4me1_mat),        colnames(h3k27me3_mat)))
+cells_use <- Reduce(intersect, list(cells_keep$rownames, cells_use))
+
+cells_keep <- cells_keep %>%
+  dplyr::filter(rownames %in% cells_use)
+
+# Keep only genes retrieve in all three modalities
+genes_use <- Reduce(  intersect,  list(rownames(rna_mat), rownames(h3k4me1_mat), rownames(h3k27me3_mat)))
+
+rna_mat       <- rna_mat[genes_use, cells_use]
+h3k4me1_mat   <- h3k4me1_mat[genes_use, colnames(h3k4me1_mat) %in% cells_use]
+h3k27me3_mat  <- h3k27me3_mat[genes_use, colnames(h3k27me3_mat) %in% cells_use]
+
+dim(rna_mat) ; dim(h3k4me1_mat) ; dim(h3k27me3_mat)
+```
+
+
+```{r}
+# ============================================================
+# CreN LP only
+# ============================================================
+# Extract multi-omic matrices for CreN LP cells only
+# This allows construction of a reference gene-level feature space based on the control population
+
+rna_mat_CreN <- GetAssayData( seurat,  assay = "SCT_umi", layer = "counts" )
+
+h3k4me1_mat_CreN <- GetAssayData(  seurat, assay = "ga_h3k4me1")
+
+h3k27me3_mat_CreN  <- GetAssayData(  seurat, assay = "ga_h3k27me3")
+
+
+cells_keep_CreN <- meta %>%
+  dplyr::filter(Group == "CreN" & annot_rna_joint_alv == "LP") 
+
+cells_use <- intersect(  colnames(rna_mat),  union(colnames(h3k4me1_mat),        colnames(h3k27me3_mat)))
+cells_use <- Reduce(intersect, list(cells_keep_CreN$rownames, cells_use))
+
+cells_keep_CreN <- cells_keep_CreN %>%
+  dplyr::filter(rownames %in% cells_use)
+
+
+genes_use <- Reduce(  intersect,  list(rownames(rna_mat), rownames(h3k4me1_mat), rownames(h3k27me3_mat)))
+
+rna_mat_CreN        <- rna_mat_CreN [genes_use, cells_use]
+h3k4me1_mat_CreN    <- h3k4me1_mat_CreN [genes_use, colnames(h3k4me1_mat) %in% cells_use]
+h3k27me3_mat_CreN   <- h3k27me3_mat_CreN [genes_use, colnames(h3k27me3_mat) %in% cells_use]
+
+dim(rna_mat_CreN ) ; dim(h3k4me1_mat_CreN ) ; dim(h3k27me3_mat_CreN )
+```
+
+
+```{r}
+# ============================================================
+# PCA and UMAP projection of genes
+# ============================================================
+# Build gene-level multi-omic feature matrix
+# Rows = cells
+# Columns = gene-associated features across modalities
+
+gene_feature_mat <- cbind(rna_mat, h3k4me1_mat,h3k27me3_mat)
+
+# Reference feature space generated from CreN LP cells only
+gene_feature_mat_CreN <- cbind(rna_mat_CreN, h3k4me1_mat_CreN,h3k27me3_mat_CreN)
+
+
+# Compute UMAP embedding where each point represents one gene
+# Genes are positioned according to their multi-omic profiles
+umap <- uwot::umap(data.frame(gene_feature_mat_CreN), n_neighbors = 10**2, metric = "correlation")
+```
+
+
+```{r}
+# ============================================================
+# Calculation of gene-level signal scores
+# ============================================================
+
+# Function to calculate mean signal per gene within a selected group
+mean_by_group <- function(mat, groups, target){
+  rowMeans(mat[ , groups %in% target], na.rm = T)
+}
+
+# Calculate average RNA expression signal
+group_vec <- cells_keep$Group
+rna_CreN <- mean_by_group(rna_mat, group_vec, "CreN")
+rna_CreP <- mean_by_group(rna_mat, group_vec, c("CreP_EARLY", "CreP_LATE"))
+rna_CreP_e <- mean_by_group(rna_mat, group_vec, c("CreP_EARLY"))
+rna_CreP_l <- mean_by_group(rna_mat, group_vec, c("CreP_LATE"))
+
+# Calculate average H3K4me1 gene activity signal
+group_vec <- cells_keep$Group[cells_keep$mark == "h3k4me1"]
+h3k4me1_CreN <- mean_by_group(h3k4me1_mat, group_vec, "CreN")
+h3k4me1_CreP <- mean_by_group(h3k4me1_mat, group_vec, c("CreP_EARLY", "CreP_LATE"))
+h3k4me1_CreP_e <- mean_by_group(h3k4me1_mat, group_vec, c("CreP_EARLY"))
+h3k4me1_CreP_l <- mean_by_group(h3k4me1_mat, group_vec, c("CreP_LATE"))
+
+# Calculate average H3K27me3 gene activity signal
+group_vec <- cells_keep$Group[cells_keep$mark == "h3k27me3"]
+h3k27me3_CreN <- mean_by_group(h3k27me3_mat, group_vec, "CreN")
+h3k27me3_CreP <- mean_by_group(h3k27me3_mat, group_vec, c("CreP_EARLY", "CreP_LATE"))
+h3k27me3_CreP_e <- mean_by_group(h3k27me3_mat, group_vec, c("CreP_EARLY"))
+h3k27me3_CreP_l <- mean_by_group(h3k27me3_mat, group_vec, c("CreP_LATE"))
+
+
+
+# Store gene-level metadata variables
+# These variables are used for visualization and interpretation, but are not included in the dimensionality reduction
+gene_meta <- data.frame(
+  gene = rownames(gene_feature_mat),
+  RNA_CreN = rna_CreN,
+  RNA_CreP = rna_CreP,
+  RNA_CreP_e = rna_CreP_e,
+  RNA_CreP_l = rna_CreP_l,
+  H3K4me1_CreN = h3k4me1_CreN,
+  H3K4me1_CreP = h3k4me1_CreP,
+  H3K4me1_CreP_e = h3k4me1_CreP_e,
+  H3K4me1_CreP_l = h3k4me1_CreP_l,
+  H3K27me3_CreN = h3k27me3_CreN,
+  H3K27me3_CreP = h3k27me3_CreP,
+  H3K27me3_CreP_e = h3k27me3_CreP_e,
+  H3K27me3_CreP_l = h3k27me3_CreP_l)
+
+
+# Calculate normalized fold changes between CreP late and CreN populations
+gene_meta$FC_RNA <- (gene_meta$RNA_CreP_l - gene_meta$RNA_CreN)/(gene_meta$RNA_CreP_l + gene_meta$RNA_CreN)
+gene_meta$FC_H3K4me1 <- (gene_meta$H3K4me1_CreP_l - gene_meta$H3K4me1_CreN)/ (gene_meta$H3K4me1_CreP_l + gene_meta$H3K4me1_CreN)
+gene_meta$FC_H3K27me3 <- (gene_meta$H3K27me3_CreP_l - gene_meta$H3K27me3_CreN )/(gene_meta$H3K27me3_CreP_l + gene_meta$H3K27me3_CreN )
+head(gene_meta)
+```
+
+
+```{r}
+#Merge UMAP coordinates with gene-level annotations
+gene_umap <- cbind(
+  gene_meta,
+  UMAP1 = umap[,1],
+  UMAP2 = umap[,2])
+head(gene_umap)
+```
+
+
+
+
+```{r}
+# Add gene identifiers as a column for visualization
+gene_umap$GeneID <- rownames(gene_umap)
+```
+### Fig. 4i
+
+Visualization of the gene-level UMAP embedding generated from integrated RNA expression, H3K4me1 and H3K27me3 gene activity features.
+ Each point represents one gene.
+Gene coordinates are fixed from the multi-omic feature space, while colors represent independent gene-level signals.
+```{r}
+# ============================================================
+# Gene-level multi-omic feature space visualization
+# ============================================================
+
+# Define color palettes for each  modality
+
+pal_RNA   <- c("grey99", "#FCE9F2", "#F6C1DA", "#F099C1", "#EA71A9", "#E44991", 
+               "#E03283", "#B61B63", "#8E154E", "#660F38", "#3E0922", "#16030C")  
+pal_K4    <- c( "grey99" , "#FCF3E9","#F6DDC1", "#F0C799", "#EAB171", "#E49C49", "#E08F32", "#B66E1B", "#8E5615", "#663E0F", "#3E2509", "#160D03")  
+pal_K27   <- c("grey99","#E9F2FC", "#C1DAF6",  "#99C1F0", "#71A9EA", "#4991E4", "#3283E0", "#1B63B6", "#154E8E", "#0F3866", "#09223E", "#030C16")  
+
+
+
+
+# Function to visualize gene-level signals on the UMAP embedding
+#
+# Input:
+# - data: gene-level UMAP table
+# - var: gene-level variable used for coloring
+# - title: plot title
+# - cols: color gradient
+#
+# Highlighted genes are displayed with labels
+
+plot_gene_umap <- function(data, var, title, cols,limits =c(0, 10), raster_dpi = 600,
+                           genes_label = c("Krt14", "Col6a1","Mylk",
+                                            "Cd81", "Lalba", "Krt18",
+                                            "Cd82","Cdk19","Ly6d",
+                                            "F3", "Csf1", "Il23a")){
+
+  ggplot( data %>% 
+            dplyr::filter(!is.na(.data[[var]])) %>%
+            arrange(.data[[var]], na.rm = T),
+          aes(UMAP1, UMAP2, 
+              fill = (.data[[var]]  ),
+              color = (.data[[var]]  )  )  ) +
+    
+        # Rasterized points to improve rendering of large gene sets
+    ggrastr::geom_point_rast(  size = 0.6,   shape = 21,    alpha = 0.1,  raster.dpi = raster_dpi  ) +
+    
+        # Highlight selected marker genes
+     geom_point(
+      data = data %>% dplyr::filter(gene %in% genes_label),
+      color = "black",size = 1, shape = 21) +
+    
+        # Add gene labels
+    geom_text_repel(
+      data = data %>% dplyr::filter(gene %in% genes_label),
+      aes(label = gene),
+      size = 2,  color = "black",  box.padding = 0.4,  point.padding = 0.3,   max.overlaps = Inf)+ 
+    
+    scale_fill_gradientn(  colours = cols , na.value = "white" , limits = limits) +
+    scale_color_gradientn(  colours = cols , na.value = "white", limits = limits  ) +
+    theme_classic() + theme(legend.key.size = unit(0.1, 'cm'), legend.title = element_blank())+
+    ggtitle(title)
+}
+
+# Plot gene-level signals in the reference CreN-based UMAP space
+
+p1 <- plot_gene_umap(gene_umap, "RNA_CreN",      "RNA – CreN",      pal_RNA, limits = c(0,3))
+p2 <- plot_gene_umap(gene_umap, "H3K4me1_CreN",  "H3K4me1 – CreN",  pal_K4, limits = c(0,6))  
+p3 <- plot_gene_umap(gene_umap, "H3K27me3_CreN", "H3K27me3 – CreN", pal_K27, limits = c(0,10))
+
+
+
+
+
+(p1 | p2 | p3) 
+
+```
+
+```{r}
+# Display genes with the strongest increase in RNA and H3K4me1 signals
+# between CreP late and CreN populations
+
+ gene_umap %>% arrange( -FC_H3K4me1 , -FC_RNA      ) %>% dplyr::select(FC_H3K27me3, FC_H3K4me1, FC_RNA ) %>% head(200)
+
+```
+
+
+Visualization of differential multi-omic signals (CreP late vs CreN)
+```{r}
+# Function to visualize normalized fold-change values
+# on the gene-level UMAP embedding
+#
+# Positive values indicate increased signal in CreP late cells,
+# whereas negative values indicate decreased signal.
+
+ plot_gene_umap <- function(data, var, title, cols,
+                           n_points = 11570,
+                           raster_dpi = 600,
+                            genes_label =c("Krt14", "Col6a1","Mylk",
+                                            "Cd81", "Lalba", "Krt18", "Cd82","Cdk19",
+                                            "Ly6d", "F3", "Csf1", "Il23a")){
+
+    data <- data %>% dplyr::filter(!is.na(.data[[var]]))
+    v <- data[[var]]
+
+  # Define symmetric color scale centered on zero
+    borne <- max(abs(v), na.rm = TRUE)
+    
+     # Subsample genes for background visualization
+    data_bg <- data %>%
+    dplyr::slice_sample(n = min(n_points, nrow(data)))
+    
+      # Always retain selected labeled genes
+    data_lab <- data %>% dplyr::filter(gene %in% genes_label) 
+
+  # Combine background and highlighted genes
+    data_plot <- dplyr::bind_rows(data_bg, data_lab) %>%
+    dplyr::distinct()
+
+  ggplot( data_plot %>%  arrange(#abs
+    (.data[[var]]), na.rm = T),
+          aes(UMAP1, UMAP2, 
+              fill = (.data[[var]]  ),
+              color = (.data[[var]]  )  )  ) +
+    
+    ggrastr::geom_point_rast(  size = 0.6,   shape = 21,    alpha = 0.5,  raster.dpi = raster_dpi  ) +
+
+     geom_point(data = data %>%  dplyr::filter(gene %in% genes_label), aes(fill = (.data[[var]]  )),
+      color = "black",size = 2, shape = 21) +
+    geom_text_repel(data = data %>%  dplyr::filter(gene %in% genes_label),
+      aes(label = gene),
+      size = 2,  color = "black",  box.padding = 0.4,  point.padding = 0.3,   max.overlaps = Inf)+ 
+    scale_fill_gradientn(  colours = cols , na.value = "white", 
+                           limits = c(-borne, borne) ) +
+    scale_color_gradientn(  colours = cols , na.value = "white" , limits = c(-borne, borne) ) +
+    theme_classic() + theme(legend.key.size = unit(0.1, 'cm'), legend.title = element_blank())+
+    ggtitle(title)
+}
+
+# Diverging palette for fold-change visualization
+pal_div <- c(  "grey90","grey80",  "#61980E"  )
+
+grid.arrange(
+  
+  plot_gene_umap(gene_umap, "FC_RNA",      "RNA – FC",      pal_div),
+  plot_gene_umap(gene_umap, "FC_H3K4me1",   "H3K4me1 – FC",      pal_div),
+  plot_gene_umap(gene_umap, "FC_H3K27me3",  "H3K27me3 – FC",      pal_div),
+
+ncol = 3)
+
+
+```
+
+
+
+
+
+
+### Ext Fig. 12 d-e
+```{r}
+# For Louvain's clustering:
+# The input matrix contains the multi-omic feature space generated from CreN cells only.
+
+seu <-  t(gene_feature_mat_CreN)
+rownames(seu) <- 1:nrow(seu)
+seu <- CreateSeuratObject(counts =seu)
+seu <- NormalizeData(seu)
+seu <- ScaleData(seu)
+seu <- FindVariableFeatures(seu)
+seu <- RunPCA(seu, npcs = 20)
+seu <- FindNeighbors(seu, dims = 1:20, k.param = 100)
+seu <- FindClusters(seu, resolution = 0.5)
+
+DimPlot(seu)
+
+gene_cluster <- seu$seurat_clusters
+```
+```{r}
+# Add gene clusters informations
+umap_df <- data.frame(
+  umap_1 = umap[,1],
+  umap_2 = umap[,2],
+  cluster = gene_cluster
+)
+
+#Visualize
+ggplot(umap_df, aes(umap_1, umap_2, color = cluster)) +
+  geom_point(size = 1) +
+  theme_classic()
+```
+
+```{r}
+# ============================================================
+# Functional enrichment analysis using Hallmark gene sets
+# ============================================================
+
+hallmarks <- msigdbr(
+  species = "Homo sapiens",
+  category = "H") %>%
+  dplyr::select(gs_name, gene_symbol)
+
+hallmark_list <- split(hallmarks$gene_symbol, hallmarks$gs_name)
+
+# Perform pathway enrichment analysis independently for each gene cluster
+enrich_per_cluster <- lapply(levels(gene_cluster), function(cl){
+
+    # Extract genes belonging to the current cluster
+  genes_cl <- rownames(gene_feature_mat_CreN)[gene_cluster == cl]
+
+    # Identify enriched Hallmark pathways
+  enrich <- enricher(
+    gene          = toupper(genes_cl),
+    TERM2GENE     = hallmarks,
+    pvalueCutoff  = 0.05,
+    pAdjustMethod = "fdr"
+  )
+
+  if (is.null(enrich)) return(NULL)
+
+  enrich@result$cluster <- cl
+  enrich@result
+})
+
+hall_df <- bind_rows(enrich_per_cluster)
+
+# Convert GeneRatio into numeric values for visualization
+hall_df <- hall_df %>%
+  mutate(
+    GeneRatio_num = as.numeric(sub("/.*", "", GeneRatio)) /
+                    as.numeric(sub(".*/", "", GeneRatio))
+  )
+
+# Select the top enriched pathways per gene cluster
+plot_df <- hall_df %>%
+  group_by(cluster) %>%
+  arrange(p.adjust) %>%
+  slice_head(n = 5) %>%
+  ungroup()
+
+pval_limits <- range(plot_df$p.adjust, na.rm = TRUE)
+
+
+# Plot Hallmark pathway enrichment across gene clusters
+ggplot(data.frame(plot_df),
+       aes(x = GeneRatio_num,
+           y = reorder(Description, GeneRatio_num),
+           fill = log10(p.adjust))) +
+  geom_col(width = 0.8) +
+  facet_wrap(~ cluster, scales = "free_y") +
+  scale_fill_gradientn(  colours = rev(pal_RNA) , na.value = "white") +
+  theme_classic() +
+  labs(    x = "Gene ratio",    y = NULL,
+    title = "Hallmark enrichment per gene cluster"  ) +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text.y = element_text(size = 9),
+    axis.text.x = element_text(size = 10),
+    plot.title = element_text(size = 14, face = "bold")  )
+```
+
+
+```{r}
+# ============================================================
+# Functional enrichment analysis using mammary epithelial signatures
+# ============================================================
+
+# Load previously defined mammary epithelial cell signatures
+Signature_ID_CreN_10x <- read.delim("C:/Users/Marthe Laisne/Desktop/BI_references_signatures_annotations/Mammarygland_Signatures_Custom/SignatureCreN_scRNA10x_Epithelial_poles.txt")
+
+# Add alveolar lineage signature from Chen et al. 2021
+LAlv_Chen2021  <- read.delim("C:/Users/Marthe Laisne/Desktop/BI_references_signatures_annotations/Mammarygland_Signatures_cellTypes/LAlv_Chen2021.txt", col.names = F)
+
+Sign <- data.frame(Type = c(Signature_ID_CreN_10x$Type,
+                            rep("Alv", nrow(LAlv_Chen2021))),
+                   Gene = c(Signature_ID_CreN_10x$Gene,
+                            LAlv_Chen2021$FALSE.))
+
+# Select the top 100 genes from each cell identity signature
+Sign <- Sign %>%
+  group_by(Type) %>%
+  slice_head(n = 100) %>%  
+  ungroup()
+
+# Format custom gene sets for clusterProfiler enrichment analysis
+custom_sets <- Sign %>%
+  mutate(
+    Gene = toupper(Gene),
+    Type = as.character(Type)  ) %>%
+  dplyr::select(
+    gs_name = Type,
+    gene_symbol = Gene  )
+
+# Number of genes per custom signature
+table(custom_sets$gs_name)
+```
+
+```{r}
+# Perform enrichment analysis using custom mammary epithelial signatures
+
+enrich_per_cluster <- lapply(levels(gene_cluster), function(cl){
+
+  genes_cl <- rownames(gene_feature_mat_CreN)[gene_cluster == cl]
+
+  enrich <- enricher(
+    gene          = toupper(genes_cl),
+    TERM2GENE     = custom_sets,
+    pvalueCutoff  = 0.05,
+    pAdjustMethod = "fdr"  )
+
+  if (is.null(enrich) || nrow(enrich@result) == 0) return(NA)
+
+  enrich@result$cluster <- cl
+  enrich@result
+})
+
+custom_df <- bind_rows(enrich_per_cluster)
+
+# Convert GeneRatio into numeric values
+custom_df <- custom_df %>%
+  mutate(
+    GeneRatio_num =
+      as.numeric(sub("/.*", "", GeneRatio)) /
+      as.numeric(sub(".*/", "", GeneRatio))
+  )
+
+plot_df <- custom_df %>%
+  dplyr::filter(cluster %in% c(0:5)) %>%
+  group_by(cluster) %>%
+  arrange(p.adjust) %>%
+  ungroup()
+```
+
+
+
+```{r}
+# Visualize enrichment of mammary epithelial signatures across gene clusters
+ggplot(plot_df,
+       aes( x = GeneRatio_num, y = reorder(Description, GeneRatio_num),   fill = log10(p.adjust)   )) +
+  geom_col(width = 0.8) +
+  facet_wrap(~ cluster, scales = "free_y") +
+  scale_fill_gradientn(  colours = rev(pal_RNA),    na.value = "white",    name = "log10 FDR"  ) +
+  theme_classic() +
+  labs(    x = "Gene ratio",    y = NULL,    title = "Custom signature enrichment per gene cluster"  ) +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text.y = element_text(size = 9),
+    axis.text.x = element_text(size = 10),
+    plot.title = element_text(size = 14, face = "bold")  )
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

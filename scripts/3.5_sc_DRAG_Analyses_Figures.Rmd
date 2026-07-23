@@ -1,0 +1,1779 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# #### Vizualisation ####
+```{r}
+library(tidyverse)
+library(packcircles)
+library(scatterpie)
+library(rstatix)
+library(ggpubr)
+library(purrr)
+library(ggplot2)
+library(patchwork)
+library(ggplot2)
+library(gridExtra)
+library(ggExtra)
+library(viridis)
+
+library(dplyr)
+library(tidyr)
+
+library(ComplexHeatmap)
+library(circlize)
+
+
+# -------------------------------------------------------------- 
+# Color definition for annotation of programs 
+# --------------------------------------------------------------
+Bin_colors <- c(
+  "Bin_MP3"  = "#fdea44",  
+  "Bin_MP4"  = "#a7d066", 
+  "Bin_MP7"  = "#e9407b",  
+  "Bin_MP9"  = "#d3e44c",  
+  "Bin_MP10" = "#b16680",  
+  "Bin_MP12" = "#973356",  
+  "Bin_MP14" = "#3f0418",  
+  "Bin_MP15" = "#f9e8cc",  
+  "Bin_MP16" = "#6c9d1e",  
+  "No_MP"    = "grey95" 
+)
+
+state_colors <- c(
+  "Basal fate"                     = "#236ec4", 
+  "Alveolar fate"                  = "#F7DCAD",  
+  "AP1 activation"                 = "#fdea44",  
+  "Angiogenic remodeling"          = "#a7d066", 
+  "Inflammatory cytokines"         = "#e9407b",  
+  "Mechanostransduction"           = "#d3e44c",  
+  "Stress survival"                = "#b16680",  
+  "Mitochondrial-stress response"  = "#973356",  
+  "Genome maintenance"             = "#3f0418",  
+  "Primed Alveolar"                = "#f9e8cc",  
+  "EMT / plasticity"               = "#6c9d1e",  
+  "Unknown"                        = "grey95"   
+)
+
+
+
+cols_fate <- c("basal"  = "#236ec4", 
+               "LP"     = "#a01858",      
+               "HS"     = "#f9c40c",  
+               "Alv"    = "#F7DCAD")
+
+
+cols_Group <- c("CreP_EARLY" = "#C0D69F",  
+                "CreP_LATE"  = "#61980E")
+
+cols_MonoGland <- c("8415_G2-3" = "#375708",  
+                    "8718_D2-3"     = "#61980E",
+                    "8964_G4"       = "#C0D69F")
+```
+
+```{r}
+Input_Dir <- "C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/sc_DRAG_Analyses"
+
+# Load functional program assignments
+anno_FP <-  read.delim(paste0(Input_Dir, "/FunctionalProgramAssignment.txt"))
+
+
+
+seurat_rna <- qs::qread(file.path("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/seurat_rna_step7_new.qs"))
+
+```
+
+
+## Bubbles and Caviar
+
+Functions: 
+```{r}
+# ------------------------------------------------------------
+# 1. Circle packing of clones
+# ------------------------------------------------------------
+# Create a circle-packing layout where each clone is represented by a circle whose area is proportional to its size
+
+pack_sample <- function(df_sample) {
+
+  packing <- circleProgressiveLayout(   df_sample$n_cells,  sizetype = "area"  )
+
+  df_layout <- cbind(df_sample, packing)
+
+    # Generate polygon coordinates for drawing clone outlines
+  vertices <- circleLayoutVertices(   packing,  npoints = 80  )
+
+  vertices$Barcode <- df_sample$Barcode[vertices$id]
+  vertices$SampleBio <- unique(df_sample$SampleBio)
+
+  list(
+    centers = df_layout,   # clone centers and radius
+    clones = vertices      # clone outlines
+  )
+}
+
+
+# ------------------------------------------------------------
+# 2. Nested circle packing function
+# ------------------------------------------------------------
+
+# Create a nested layout where:
+#   - each clone is represented as a large circle
+#   - individual cells are packed inside their corresponding clone
+
+pack_one_sample_nested_MP <- function(df_sample, df_cells_sample) {
+  
+  # ---- Clone-level packing ----
+  packing_clones <- circleProgressiveLayout(
+    df_sample$n_cells,  sizetype = "area"  )
+  
+  df_layout <- cbind(df_sample, packing_clones)
+  
+  # Generate polygon coordinates for drawing clone outlines
+  vertices_clones <- circleLayoutVertices(  packing_clones,    npoints = 80  )
+  
+  vertices_clones$Barcode <- df_sample$Barcode[vertices_clones$id]
+  vertices_clones$SampleBio <- unique(df_sample$SampleBio)
+  
+  
+  # ---- Cell-level packing ----  
+  all_cells_centers <- list()
+  
+  for(i in seq_len(nrow(df_layout))) {
+    
+    clone_info <- df_layout[i, ]
+    
+    # Extract cells belonging to the current clone
+    cells_clone <- df_cells_sample %>%
+      dplyr::filter(Barcode == clone_info$Barcode)
+    
+     # Pack cells as equally sized circles
+    packing_cells <- circleProgressiveLayout(
+      rep(1, nrow(cells_clone)),
+      sizetype = "area"
+    )
+    
+     # Rescale cell packing to fit within the clone circle
+    scale_factor <- clone_info$radius /
+      max(  sqrt(packing_cells$x^2 + packing_cells$y^2) +    packing_cells$radius   )
+    
+    # Translate and scale cell coordinates to clone position
+    packing_cells$x <-  packing_cells$x * scale_factor +  clone_info$x
+    packing_cells$y <-  packing_cells$y * scale_factor +  clone_info$y
+    packing_cells$radius <-   packing_cells$radius * scale_factor
+    
+    # Store cell coordinates together with metadata
+    cell_centers <- cbind(  packing_cells,  cells_clone   )
+    cell_centers$Barcode <- clone_info$Barcode
+    cell_centers$SampleBio <- clone_info$SampleBio
+    
+    all_cells_centers[[i]] <- cell_centers
+  }
+  
+  list(
+    clones = vertices_clones,              # clone outlines
+    cells = bind_rows(all_cells_centers),  # cell positions
+    centers = df_layout                    # clone centers
+  )
+}
+
+
+#-------------------------------------------------------------
+# Nested clone / cell packing
+#-------------------------------------------------------------
+# Creates a nested layout where clones are represented as large
+# circles containing equally sized circles corresponding to cells.
+#
+# color_var : metadata column copied to each cell polygon and
+#             used afterwards for plotting.
+pack_one_sample_nested <- function(df_sample,
+                                   df_cells_sample,
+                                   color_var) {
+
+  ## Clone layout
+  packing_clones <- circleProgressiveLayout(
+    df_sample$n_cells,
+    sizetype = "area"
+  )
+
+  df_layout <- cbind(df_sample, packing_clones)
+
+  vertices_clones <- circleLayoutVertices(
+    packing_clones,
+    npoints = 50
+  )
+
+  vertices_clones$Barcode  <- df_sample$Barcode[vertices_clones$id]
+  vertices_clones$SampleBio <- unique(df_sample$SampleBio)
+
+  ## Cell layout
+  all_cells_layout <- list()
+
+  for(i in seq_len(nrow(df_layout))) {
+
+    clone_info <- df_layout[i, ]
+
+    cells_clone <- df_cells_sample %>%
+      filter(Barcode == clone_info$Barcode)
+
+    packing_cells <- circleProgressiveLayout(
+      rep(1, nrow(cells_clone)),
+      sizetype = "area"
+    )
+
+    scale_factor <-
+      clone_info$radius /
+      max(
+        sqrt(packing_cells$x^2 + packing_cells$y^2) +
+          packing_cells$radius
+      )
+
+    packing_cells$x <- packing_cells$x * scale_factor + clone_info$x
+    packing_cells$y <- packing_cells$y * scale_factor + clone_info$y
+    packing_cells$radius <- packing_cells$radius * scale_factor
+
+    vertices_cells <- circleLayoutVertices(
+      packing_cells,
+      npoints = 20
+    )
+
+    vertices_cells$ColorValue <- cells_clone[[color_var]][vertices_cells$id]
+    vertices_cells$Barcode <- clone_info$Barcode
+    vertices_cells$SampleBio <- clone_info$SampleBio
+
+    all_cells_layout[[i]] <- vertices_cells
+  }
+
+  list(
+    clones = vertices_clones,
+    cells = bind_rows(all_cells_layout),
+    centers = df_layout
+  )
+}
+
+```
+
+
+### Fig 3f. Bubble Expanded
+
+```{r}
+df_cells <- anno_FP %>%
+  filter(!is.na(Barcode)) %>%
+  mutate(cell_id = row_number())
+
+df_clones <- df_cells %>%
+  dplyr::count(SampleBio, Barcode, 
+        name = "n_cells")
+
+
+# ------------------------------------------------------------
+#  Generate layouts for all biological samples
+# ------------------------------------------------------------
+
+packed <- df_clones %>%
+  group_split(SampleBio) %>%
+  lapply(pack_sample)
+
+# Merge layouts across samples
+df_clones_vertices <- bind_rows(lapply(packed, `[[`, "clones"))
+df_clones_centers  <- bind_rows(lapply(packed, `[[`, "centers"))
+
+
+# ------------------------------------------------------------
+# add annotation
+# ------------------------------------------------------------
+
+#Add clone expansion status
+df_clones_vertices <- df_clones_vertices %>%
+  left_join(anno_FP[, c("Barcode", "ExpandedClone")] %>%distinct(), by = "Barcode")%>%
+  distinct()
+
+#N cell 
+df_clone_counts <- anno_FP %>%
+  dplyr::count(Barcode, SampleBio, name = "n_cells")
+
+#compute annotation point
+df_clone_centroids <- df_clones_vertices %>%
+  ungroup() %>%group_by(Barcode, SampleBio) %>%
+  summarise(
+    x = mean(x),
+    y = mean(y),
+    .groups = "drop"
+  ) %>%
+  left_join(df_clone_counts, by = c("Barcode", "SampleBio"))
+
+
+# ------------------------------------------------------------
+# 4. Plot clone-level functional program composition
+# ------------------------------------------------------------
+
+ggplot() +
+  geom_polygon( data = df_clones_vertices,
+    aes(x, y,  fill = ExpandedClone, group = interaction(Barcode, SampleBio)),
+    colour = "black", size = 0.4  ) +
+  geom_text(data = df_clone_centroids,
+    aes(x = x, y = y, label = n_cells),
+    size = 3,    color = "black"  ) +
+  
+  facet_wrap(~ SampleBio) +
+  scale_fill_manual(values = c("#d0e0ea","#4384ac", "#0a334c") %>%rev)+
+  coord_equal() +
+  theme_void()
+```
+
+
+### Fig 4d. Nested bubble Pseudotime
+```{r}
+# -----------------------------
+# 1. Data preparation
+# -----------------------------
+
+# Keep only cells with a valid lineage barcode
+df_cells <- anno_FP %>%
+  dplyr::filter(!is.na(Barcode)) %>%
+  mutate(cell_id = row_number())
+
+# Compute clone sizes (number of cells per barcode)
+df_clones <- df_cells %>%
+  count(SampleBio, Barcode, name = "n_cells")
+
+
+# ------------------------------------------------------------
+# 2. Generate nested layouts for all biological samples
+# ------------------------------------------------------------
+
+packed <- df_clones %>%
+  group_split(SampleBio) %>%
+  lapply(function(df_sample) {
+    
+    sample_name <- unique(df_sample$SampleBio)
+    
+     # Keep cells from the current sample only
+    df_cells_sample <- df_cells %>%
+      dplyr::filter(SampleBio == sample_name)
+    
+    # Compute nested layout
+    pack_one_sample_nested( df_sample,  df_cells_sample, "pseudotime"  )
+  })
+
+# Combine layouts across samples
+df_clones_vertices <- bind_rows(lapply(packed, `[[`, "clones"))
+df_cells_vertices <- bind_rows(lapply(packed, `[[`, "cells"))
+
+# ------------------------------------------------------------
+#  Plot nested clone architecture
+# ------------------------------------------------------------
+ggplot() +
+  
+   # Draw clone boundaries
+  geom_polygon(
+    data = df_clones_vertices,
+    aes(x, y,   group = interaction(  Barcode,  SampleBio  )),
+    fill = NA,  colour = "black",  linewidth = 0.3  ) +
+  
+  # Draw each cell colored by pPT
+  geom_polygon(  data = df_cells_vertices,
+    aes(x, y, group = interaction(id, Barcode, SampleBio),
+        fill = ColorValue),
+    colour = NA  ) + 
+  scale_fill_viridis_c(option = "magma") +
+  
+  facet_wrap(    ~ SampleBio  ) +
+  coord_equal() +
+  theme_void()
+```
+### Fig 5b. Nested Cell Fate
+```{r}
+# ------------------------------------------------------------
+# 2. Generate nested layouts for all biological samples
+# ------------------------------------------------------------
+
+packed <- df_clones %>%
+  group_split(SampleBio) %>%
+  lapply(function(df_sample) {
+    
+    sample_name <- unique(df_sample$SampleBio)
+    
+     # Keep cells from the current sample only
+    df_cells_sample <- df_cells %>%
+      dplyr::filter(SampleBio == sample_name)
+    
+    # Compute nested layout
+    pack_one_sample_nested( df_sample,  df_cells_sample, "annot_rna_joint_alv"  )
+  })
+
+# Combine layouts across samples
+df_clones_vertices <- bind_rows(lapply(packed, `[[`, "clones"))
+df_cells_vertices <- bind_rows(lapply(packed, `[[`, "cells"))
+
+# ------------------------------------------------------------
+#  Plot nested clone architecture
+# ------------------------------------------------------------
+ggplot() +
+  
+   # Draw clone boundaries
+  geom_polygon(
+    data = df_clones_vertices,
+    aes(x, y,   group = interaction(  Barcode,  SampleBio  )),
+    fill = NA,  colour = "black",  linewidth = 0.3  ) +
+  
+  # Draw each cell colored by pPT
+  geom_polygon(  data = df_cells_vertices,
+    aes(x, y, group = interaction(id, Barcode, SampleBio),
+        fill = ColorValue),
+    colour = NA  ) + 
+  
+  scale_fill_manual(values = cols_fate) +
+  facet_wrap(    ~ SampleBio  ) +
+  coord_equal() +
+  theme_void()
+```
+
+
+
+
+### Fig 4a. Nested Bubbles - clonal architecture and functional programs
+
+```{r}
+# -----------------------------
+# 1. Data preparation
+# -----------------------------
+anno_FP <-  read.delim(paste0(Input_Dir, "/FunctionalProgramAssignment.txt"))
+
+
+# Identify functional program (metaprogram) columns
+mp_cols <- grep("^Bin_MP", colnames(anno_FP), value = TRUE)
+
+# Keep only cells with a valid lineage barcode
+df_cells <- anno_FP %>%
+  dplyr::filter(!is.na(Barcode)) %>%
+  mutate(cell_id = row_number())
+
+# Compute clone sizes (number of cells per barcode)
+df_clones <- df_cells %>%
+  count(SampleBio, Barcode, name = "n_cells")
+
+
+
+
+# ------------------------------------------------------------
+# 2. Generate nested layouts for all biological samples
+# ------------------------------------------------------------
+
+packed <- df_clones %>%
+  group_split(SampleBio) %>%
+  lapply(function(df_sample) {
+    
+    sample_name <- unique(df_sample$SampleBio)
+    
+     # Keep cells from the current sample only
+    df_cells_sample <- df_cells %>%
+      dplyr::filter(SampleBio == sample_name)
+    
+    # Compute nested layout
+    pack_one_sample_nested_MP( df_sample,  df_cells_sample  )
+  })
+
+# Combine layouts across samples
+df_clones_vertices <- bind_rows(lapply(packed, `[[`, "clones"))
+df_cells_centers <- bind_rows(lapply(packed, `[[`, "cells"))
+
+# ------------------------------------------------------------
+# 3. Prepare functional program composition for pie charts
+# ------------------------------------------------------------
+
+# Convert logical functional program assignments (TRUE/FALSE)
+# into numeric values (1/0) required by geom_scatterpie()
+df_cells_pies <- df_cells_centers %>%
+  mutate(across(all_of(mp_cols),~ as.numeric(.x)  ))
+
+# Add an additional category for cells without any active program
+df_cells_pies <- df_cells_pies %>%
+  mutate(
+    n_MP = rowSums(across(all_of(mp_cols)), na.rm = TRUE),
+    No_MP = as.numeric(n_MP == 0)  )
+
+# Functional program columns used for pie chart composition
+cols_use <- mp_cols
+
+
+# ------------------------------------------------------------
+# 4. Plot nested clone architecture
+# ------------------------------------------------------------
+
+ggplot() +
+  
+   # Draw clone boundaries
+  geom_polygon(
+    data = df_clones_vertices,
+    aes(x, y,   group = interaction(  Barcode,  SampleBio  )),
+    fill = NA,  colour = "black",  linewidth = 0.3  ) +
+  
+  # Draw each cell as a pie chart representing its active functional programs
+  geom_scatterpie(
+  data = df_cells_pies,
+  aes(x = x, y = y, r = radius),
+  cols = c("No_MP", cols_use),  color = "grey40") +
+  
+  scale_fill_manual(values = Bin_colors)+
+  facet_wrap(    ~ SampleBio  ) +
+  coord_equal() +
+  theme_void()
+
+```
+
+### Fig 3f. Bubble & Pies - Functional program composition of individual clones
+
+```{r}
+# ------------------------------------------------------------
+# 1. Compute functional program composition at the clone level
+# ------------------------------------------------------------
+
+# For each clone, calculate the proportion of cells assigned to each functional program
+df_clones_MP <- df_cells %>%
+  group_by(SampleBio, Barcode) %>%
+  summarise(
+    n_cells = n(),
+    across(all_of(mp_cols), ~ mean(as.numeric(.x), na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+
+
+# ------------------------------------------------------------
+# 3. Generate layouts for all biological samples
+# ------------------------------------------------------------
+
+packed <- df_clones_MP %>%
+  group_split(SampleBio) %>%
+  lapply(pack_sample)
+
+# Merge layouts across samples
+df_clones_vertices <- bind_rows(lapply(packed, `[[`, "clones"))
+df_clones_centers  <- bind_rows(lapply(packed, `[[`, "centers")) %>%
+  mutate(
+    n_MP = rowSums(across(all_of(mp_cols)), na.rm = TRUE),
+     # Add info for clones lacking any detected functional program
+    No_MP = as.numeric(n_MP == 0)
+  )
+
+# ------------------------------------------------------------
+# 4. Plot clone-level functional program composition
+# ------------------------------------------------------------
+
+ggplot() +
+
+  # contours clones
+  geom_polygon(
+    data = df_clones_vertices,
+    aes(x, y, group = interaction(Barcode, SampleBio)),
+    fill = NA,  colour = "black",  linewidth = 0.3  ) +
+
+  # pies = MP composition du clone
+  geom_scatterpie(data = df_clones_centers,
+    aes(x = x, y = y, r = radius),
+    cols = c("No_MP", mp_cols),   color = "grey40"  ) +
+
+  facet_wrap(~ SampleBio) +
+  scale_fill_manual(values = Bin_colors)+
+  coord_equal() +
+  theme_void()
+```
+
+```{r}
+df_clones_centers %>% 
+  filter(SampleBio %in% c("8964_G4", "8415_G2-3", "8718_D2-3"),
+                           !is.na(Barcode),
+                           !No_MP != 0) %>%
+  mutate( NombreMP = rowSums(across(all_of(mp_cols)) > 0, 
+                             na.rm = TRUE) ,
+          x_jitter = (n_cells + runif(n(), -0.05, 0.05) * n_cells ),
+          y_jitter = NombreMP + runif(n(), -0.05, 0.05),
+          radius_scaled = radius * 0.4) %>%
+  
+  ggplot( ) +
+  geom_smooth(aes(x = n_cells, y = NombreMP), 
+              method = "loess", se = F, color = "grey")+
+  geom_scatterpie(  aes(x = x_jitter   , y = y_jitter , r = radius_scaled),
+                    cols = c("No_MP", mp_cols),   color = "black" , alpha = 1 ) +
+  scale_fill_manual(values = Bin_colors)+
+  coord_equal()+
+  scale_x_continuous(limits = c(0,50))+
+  theme_classic()
+```
+
+
+
+```{r}
+# Résumé au niveau des clones
+plot_df <- df_clones_MP %>%
+  mutate(
+    n_MP = rowSums(across(all_of(mp_cols)) > 0, na.rm = TRUE)
+  ) %>%
+  left_join(
+    df_cells %>%
+      group_by(SampleBio, Barcode) %>%
+      summarise(CloneSize = n(), .groups = "drop"),
+    by = c("SampleBio", "Barcode")
+  )
+
+library(dplyr)
+library(scatterpie)
+
+plot_df <- df_clones_MP %>%
+  left_join(
+    df_cells %>%
+      count(SampleBio, Barcode, name = "CloneSize"),
+    by = c("SampleBio", "Barcode")
+  ) %>%
+  mutate(
+    n_MP = rowSums(across(all_of(mp_cols), ~ .x > 0))
+  )
+
+pie_df <- plot_df %>%
+  mutate(
+    radius = sqrt(CloneSize) / 10   # à ajuster
+  )
+
+ggplot() +
+  geom_scatterpie(
+    data = pie_df,
+    aes(x = CloneSize, y = n_MP),
+    cols = mp_cols,
+    color = "grey40"
+  ) +
+  scale_fill_manual(values = Bin_colors) +
+  scale_x_log10() +
+  theme_classic() +
+  labs(
+    x = "Clone size",
+    y = "Number of functional programs"
+  )
+```
+
+
+## Fig 3g. Boxplots - Intraclonal heterogeneity
+```{r}
+# Load RNA distance to clonal centroid table
+
+df_dist <- read.delim(paste0(Input_Dir, "/RNADistCentroid.txt"))
+
+# --------------------------------------------------------------
+# Statistics
+# --------------------------------------------------------------
+df <- df_dist %>%
+  subset( is.na(Clone)==F)
+
+tuk <- df %>%
+  tukey_hsd(dist_to_centroid ~ Group) %>%
+  add_xy_position(x = "Cluster")
+
+
+# --------------------------------------------------------------
+# Visualize transcriptional heterogeneity across Group (biological Age)
+# --------------------------------------------------------------
+ggplot(subset(df_dist, is.na(Clone)==F),
+       aes(x = Group, y = dist_to_centroid)) +
+  geom_boxplot(outliers = F, aes( fill = Group)) +
+  stat_compare_means(method = "anova",
+                     label.y = max(df$dist_to_centroid, na.rm = TRUE) * 1.5) +
+  stat_pvalue_manual(tuk, label = "p.adj.signif", step.increase = 0.1,  
+                     xmin = "group1",xmax = "group2") +
+  scale_fill_manual(values = c("#C0D69F", "#61980E"))+
+  theme_classic(base_size = 14) +
+  labs(y = "Distance to clone-centroid - RNA", x = "") +
+  theme(legend.position = "none")
+```
+```{r}
+# --------------------------------------------------------------
+# Statistics
+# --------------------------------------------------------------
+df <- df_dist %>%
+  subset( is.na(Expand)==F)
+
+tuk <- df %>%
+  tukey_hsd(dist_to_centroid ~ Expand) %>%
+  add_xy_position(x = "Cluster")
+
+
+# --------------------------------------------------------------
+# Visualize transcriptional heterogeneity across clone classes
+# --------------------------------------------------------------
+ggplot(subset(df_dist, is.na(Expand)==F),
+       aes(x = Expand, y = dist_to_centroid)) +
+  geom_boxplot(outliers = F, aes( fill = Expand)) +
+  stat_compare_means(method = "anova",
+                     label.y = max(df$dist_to_centroid, na.rm = TRUE) ) +
+  stat_pvalue_manual(tuk, label = "p.adj.signif", step.increase = 0.1,  
+                     xmin = "group1",xmax = "group2") +
+  scale_fill_manual(values = c("#d0e0ea","#4384ac", "#0a334c") %>%rev)+
+  scale_x_discrete(limits = c("Small", "Int", "Expanded"))+
+  theme_classic(base_size = 14) +
+  labs(y = "Distance to clone-centroid - RNA", x = "") +
+  theme(legend.position = "none")
+```
+
+
+```{r}
+# Load EpiG H3K4me1  distance to clonal centroid table
+df_dist <- read.delim(paste0(Input_Dir, "/H3K4me1DistCentroid.txt"))
+
+# --------------------------------------------------------------
+# Statistics
+# --------------------------------------------------------------
+df <- df_dist %>%
+  subset( is.na(Clone)==F)
+
+tuk <- df %>%
+  tukey_hsd(dist_to_centroid ~ Group) %>%
+  add_xy_position(x = "Group")
+
+
+# --------------------------------------------------------------
+# Visualize transcriptional heterogeneity across Group (biological Age)
+# --------------------------------------------------------------
+ggplot(subset(df_dist, is.na(Clone)==F),
+       aes(x = Group, y = dist_to_centroid)) +
+  geom_boxplot(outliers = F, aes( fill = Group)) +
+  stat_compare_means(method = "anova",
+                     label.y = 2) +
+  stat_pvalue_manual(tuk, label = "p.adj.signif", step.increase = 0.1,  
+                     xmin = "group1",xmax = "group2") +
+  scale_fill_manual(values = c("#C0D69F", "#61980E"))+
+  theme_classic(base_size = 14) +
+  labs(y = "Distance to clone-centroid", x = "") +
+  theme(legend.position = "none")
+```
+```{r}
+# --------------------------------------------------------------
+# Statistics
+# --------------------------------------------------------------
+df <- df_dist %>%
+  subset( is.na(ExpandedClone)==F)
+
+tuk <- df %>%
+  tukey_hsd(dist_to_centroid ~ ExpandedClone) %>%
+  add_xy_position(x = "ExpandedClone")
+
+
+# --------------------------------------------------------------
+# Visualize transcriptional heterogeneity across clone classes
+# --------------------------------------------------------------
+ggplot(subset(df_dist, is.na(ExpandedClone)==F),
+       aes(x = ExpandedClone, y = dist_to_centroid)) +
+  geom_boxplot(outliers = F, aes( fill = ExpandedClone)) +
+  stat_compare_means(method = "anova",
+                     label.y = max(df$dist_to_centroid, na.rm = TRUE) ) +
+  stat_pvalue_manual(tuk, label = "p.adj.signif", step.increase = 0.1,  
+                     xmin = "group1",xmax = "group2") +
+  scale_fill_manual(values = c("#d0e0ea","#4384ac", "#0a334c") %>%rev)+
+  scale_x_discrete(limits = c("Small", "Int", "Expanded"))+
+  theme_classic(base_size = 14) +
+  labs(y = "Distance to clone-centroid", x = "") +
+  theme(legend.position = "none")
+```
+
+```{r}
+# Number of cells per clone category
+table(df_dist$ExpandedClone)
+```
+
+
+
+```{r}
+# Load EpiG H3K27me3 distance to clonal centroid table
+
+df_dist <- read.delim(paste0(Input_Dir, "/H3K27me3DistCentroid.txt"))
+
+# --------------------------------------------------------------
+# Statistics
+# --------------------------------------------------------------
+df <- df_dist %>%
+  subset( is.na(Clone)==F)
+
+tuk <- df %>%
+  tukey_hsd(dist_to_centroid ~ Group) %>%
+  add_xy_position(x = "Group")
+
+
+# --------------------------------------------------------------
+# Visualize transcriptional heterogeneity across Group (biological Age)
+# --------------------------------------------------------------
+ggplot(subset(df_dist, is.na(Clone)==F),
+       aes(x = Group, y = dist_to_centroid)) +
+  geom_boxplot(outliers = F, aes( fill = Group)) +
+  stat_compare_means(method = "anova",
+                     label.y = 2) +
+  stat_pvalue_manual(tuk, label = "p.adj.signif", step.increase = 0.1,  
+                     xmin = "group1",xmax = "group2") +
+  scale_fill_manual(values = c("#C0D69F", "#61980E"))+
+  theme_classic(base_size = 14) +
+  labs(y = "Distance to clone-centroid", x = "") +
+  theme(legend.position = "none")
+```
+```{r}
+# --------------------------------------------------------------
+# Statistics
+# --------------------------------------------------------------
+df <- df_dist %>%
+  subset( is.na(ExpandedClone)==F)
+
+tuk <- df %>%
+  tukey_hsd(dist_to_centroid ~ ExpandedClone) %>%
+  add_xy_position(x = "ExpandedClone")
+
+
+# --------------------------------------------------------------
+# Visualize transcriptional heterogeneity across clone classes
+# --------------------------------------------------------------
+ggplot(subset(df_dist, is.na(ExpandedClone)==F),
+       aes(x = ExpandedClone, y = dist_to_centroid)) +
+  geom_boxplot(outliers = F, aes( fill = ExpandedClone)) +
+  stat_compare_means(method = "anova",
+                     label.y = max(df$dist_to_centroid, na.rm = TRUE) ) +
+  stat_pvalue_manual(tuk, label = "p.adj.signif", step.increase = 0.1,  
+                     xmin = "group1",xmax = "group2") +
+  scale_fill_manual(values = c("#d0e0ea","#4384ac", "#0a334c") %>%rev)+
+  scale_x_discrete(limits = c("Small", "Int", "Expanded"))+
+  theme_classic(base_size = 14) +
+  labs(y = "Distance to clone-centroid", x = "") +
+  theme(legend.position = "none")
+```
+
+```{r}
+# Number of cells per clone category
+table(df_dist$ExpandedClone)
+```
+
+## Fig 3h. Boxplots - FP by clone
+
+```{r}
+# Load Number of FP for each clone table
+
+clone_stats <- read.delim(paste0(Input_Dir, "/FP_byClone.txt"))
+# --------------------------------------------------------------
+# Statistics
+# --------------------------------------------------------------
+df <- subset(clone_stats, is.na(ExpandedClone)==F)
+tuk <- df %>%
+  tukey_hsd(n_active_MP ~ ExpandedClone) %>%
+  add_xy_position(x = "ExpandedClone")
+
+
+# --------------------------------------------------------------
+# Visualize transcriptional heterogeneity across clone classes
+# --------------------------------------------------------------
+
+ggplot(clone_stats,
+       aes(x = ExpandedClone, n_active_MP)) +
+  geom_boxplot(aes(fill = ExpandedClone))+
+  geom_point(aes(fill = ExpandedClone),
+              alpha = 0.8, color = "black", shape = 21, size = 3,
+             position = position_jitter(width = 0.2, height = 0.02)) +
+
+  stat_compare_means(method = "anova",
+                     label.y = max(df$dist_to_centroid, na.rm = TRUE) ) +
+  stat_pvalue_manual(tuk, label = "p.adj.signif", step.increase = 0.1,  
+                     xmin = "group1",xmax = "group2") +
+  
+  theme_classic(base_size = 14) +
+  scale_fill_manual(values = c("#d0e0ea","#4384ac", "#0a334c") %>%rev)+
+  scale_x_discrete(limits = c("Small", "Int", "Expanded"))+
+  labs(   x = "Clone size",   y = "N MP per clone"  )
+  
+
+
+```
+
+
+```{r}
+ggplot(subset(clone_stats, is.na(ExpandedClone)==F),
+       aes(clone_size, MP_entropy)) +
+  geom_point(aes(fill = ExpandedClone), 
+             alpha = 0.8, color = "black", shape = 21, size = 3,
+             position = position_jitter(width = 0.2, height = 0.02)) +
+  geom_smooth(method = "lm", color = "black", se = F) +
+  stat_cor(   method = "pearson",   
+              aes(label = paste(after_stat(r.label),after_stat(p.label),  
+                                sep = "~`,`~")),
+    label.x.npc = 0.8,   label.y.npc = 1.0,   size = 2  ) +
+   scale_fill_manual(values = c("#d0e0ea","#4384ac", "#0a334c") %>%rev)+
+  theme_classic(base_size = 14) +
+  labs(   x = "Clone size",   y = "MP entropy per clone"  ) 
+```
+
+## Fig 3j.  Heatmap - Clonal expansion and FP
+```{r}
+# Load Number of FP for each clone table
+clone_stats <- read.delim(paste0(Input_Dir, "/FP_byClone.txt"))
+
+# Load functional program assignment table
+df <-  read.delim(paste0(Input_Dir, "/FunctionalProgramAssignment.txt"))
+
+# Identify columns corresponding to FP assignments
+mp_cols <- grep("^Bin_MP", colnames(df), value = TRUE)
+
+# Compute number of FP active per cell
+df <- df %>%
+  mutate( n_MP = rowSums(across(all_of(mp_cols)),
+                   na.rm = TRUE)  )
+
+
+# restrict df to monogland
+df_sub <- df %>%
+  dplyr::filter(
+    SampleBio %in% c("8964_G4", "8718_D2-3", "8415_G2-3"),
+    !is.na(Barcode)
+  )
+
+clone_stats <- clone_stats %>%
+  mutate(
+    clone_group = case_when(
+      clone_size <= 3 & clone_size >=1  ~ "small",
+      clone_size <= 7 & clone_size > 3 ~ "medium",
+      TRUE ~ "expanded"    )  )
+table(clone_stats$clone_group)
+
+plot_df <- df_sub %>%
+   dplyr::select(n_MP,mp_cols, Barcode ) %>%
+   dplyr::filter(n_MP > 0) %>%
+  mutate(clone_group = clone_stats$clone_group[    match(Barcode, clone_stats$Barcode)  ]) %>%
+  pivot_longer(    all_of(mp_cols),    names_to = "MP",    values_to = "active"  ) %>%
+  dplyr::filter(active == 1) %>% ungroup() %>%
+  group_by(clone_group, MP) %>%
+  summarise(    n = n(),    .groups = "drop"  )
+
+totals <- df_sub %>%
+  mutate(
+    clone_group = clone_stats$clone_group[
+      match(Barcode, clone_stats$Barcode)
+    ]
+  ) %>%
+  group_by(clone_group) %>%
+  summarise(
+    n_cells = n(),
+    .groups = "drop"
+  )
+
+
+plot_df <- plot_df %>%
+  left_join(totals, by = "clone_group") %>%
+  mutate(
+    frac = n / n_cells * 100
+  )
+
+
+ggplot(plot_df,
+       aes(MP, clone_group, fill = frac)) +
+  geom_tile() +
+  scale_fill_distiller(palette = "Spectral", direction = -1) +
+
+  scale_x_discrete(limits = paste0("Bin_MP", c(10, 12, 16, " ", 
+                                               14, 7, 15, ".",
+                                               3, 4, 9) %>% rev))+
+  theme_classic(base_size = 14) +
+  theme(    axis.text.x = element_text(angle = 45, hjust = 1)  ) +  
+  scale_y_discrete(limits  = c( "small", "medium", "expanded") )+
+  labs(    x = NULL,    y = NULL,    fill = "% cells\nMP+"  )+
+  coord_flip()
+```
+## Fig 3l. Heatmap – Differentially Expressed Genes (DEGs) in expanding clones
+```{r}
+# ------------------------------------------------------------
+# Load input matrices
+# ------------------------------------------------------------
+mat_deg <- read.csv(paste0(Input_Dir,  "/mat_degSup5.csv"))
+DEGs_sup5 <- read.csv(paste0(Input_Dir,  "/DEGs_sup5.csv"))
+
+mat_multi <- read.csv(paste0(Input_Dir, "/mat_degSup5_UP_multi.csv"))
+
+# ------------------------------------------------------------
+# Build clone annotation table
+# ------------------------------------------------------------
+annot_col <- DEGs_sup5 %>%
+  dplyr::select(clone, sampleOrigine, clonesize) %>%
+  distinct() %>%
+  as.data.frame()
+rownames(annot_col) <- annot_col$clone
+
+# ------------------------------------------------------------
+# Format binary gene × clone matrices
+# ------------------------------------------------------------
+mat <- as.matrix(mat_deg[, -c(1,2)]) # remove gene metadata columns
+rownames(mat) <- mat_deg$gene
+
+rownames(mat_multi) <- mat_multi$gene
+mat_multi <- as.matrix(mat_multi[, -c(1,2)])
+
+# ------------------------------------------------------------
+# Color mapping for binary DEG matrix
+# ------------------------------------------------------------
+col_fun <- c("0" = "white", "1" = "#3a5b6f")
+
+
+# ------------------------------------------------------------
+# Format annotation metadata
+# ------------------------------------------------------------
+annot_col <- annot_col %>%
+  mutate(
+    sampleOrigine = as.character(sampleOrigine),
+    clonesize = as.numeric(clonesize)
+  )
+
+# Predefined palette for sample origin
+sample_colors <- cols_MonoGland
+
+# ------------------------------------------------------------
+# Column annotation (clone metadata)
+# ------------------------------------------------------------
+ha_col <- HeatmapAnnotation(
+  df = annot_col[, c("sampleOrigine", "clonesize")],
+  col = list(
+    sampleOrigine = sample_colors,
+    clonesize = colorRamp2(
+      range(annot_col$clonesize, na.rm = TRUE),
+      c("lightgrey", "black")
+    )
+  ),
+  annotation_legend_param = list(
+    sampleOrigine = list(title = "Sample origin"),
+    clonesize = list(title = "Clone size")
+  )
+)
+
+# ------------------------------------------------------------
+# Row annotation: Marker frequency
+# ------------------------------------------------------------
+row_sum <- rowSums(mat)
+ha_bar <- rowAnnotation(
+  "Clone count" = anno_barplot(
+    row_sum,
+    bar_width = 1,
+    border = FALSE,
+    gp = gpar(fill = "#3a5b6f"),
+    width = unit(2, "cm")
+  )
+)
+
+
+
+# ============================================================
+# HEATMAP 1: all DEGs
+# ============================================================
+m1 <- Heatmap(
+  mat,
+  name = "DEG",
+  col = col_fun,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  clustering_distance_rows = "maximum",
+  clustering_method_rows = "ward.D2",
+  row_title = "Genes",
+  column_title = "Clones",
+  top_annotation = ha_col,
+  heatmap_legend_param = list(
+    at = c(0, 1),
+    labels = c("Absent", "Present")
+  )
+)+ ha_bar
+
+draw(m1, heatmap_legend_side = "bottom", annotation_legend_side = "right")
+```
+
+Extended Fig 6c
+```{r}
+# ============================================================
+# HEATMAP 2: subset (frequent DEGs)
+# ============================================================
+
+row_sum <- rowSums(mat_multi)
+
+ha_bar <- rowAnnotation(
+  "Clone count" = anno_barplot(
+    row_sum,
+    bar_width = 1,
+    border = FALSE,
+    gp = gpar(fill = "#3a5b6f"),
+    width = unit(2, "cm")
+  )
+)
+
+
+
+m2 <- Heatmap(
+  mat_multi,
+  name = "DEG",
+  col = col_fun,
+  show_row_names = TRUE,
+  row_names_side = "left",
+  show_column_names = FALSE,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  clustering_distance_rows = "maximum",
+  clustering_method_rows = "ward.D2",
+  row_title = "Genes",
+  column_title = "Clones",
+  top_annotation = ha_col,
+  heatmap_legend_param = list(
+    at = c(0, 1),
+    labels = c("Absent", "Present")
+  ),
+  row_names_gp = gpar(fontsize = 6, fontface = "plain"), 
+)+  ha_bar
+
+
+draw(m2, heatmap_legend_side = "bottom", annotation_legend_side = "right")
+```
+Extended Fig 6a
+
+Number of DEGs vs. Clone size per sample
+
+```{r}
+n_DEGs <- DEGs_sup5%>%
+  group_by(clone, clonesize, sampleOrigine) %>%
+  summarise(n_DEGs = n_distinct(gene), .groups = "drop")
+
+ggplot(n_DEGs, aes(x =  clonesize, y = n_DEGs, fill = sampleOrigine)) +
+  geom_point(alpha = 0.8, position = position_jitter(width = 0.1, height = 0), 
+             shape = 21, color = "black", size = 3)  +
+
+  scale_fill_manual(values = rev(c( "#b6cf53" ,"#77b836", "#416c2c")))+
+  scale_x_continuous(limits  = c(0, 25))+
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank() ) +
+  labs( x = "Clone size",
+    y = "Number of DEGs",
+    size = "Clone size",
+    title = "Number of DEGs per clone across samples" )
+```
+
+## Fig 5d. Violin - Cell Fate switch 
+```{r}
+# Load cell Fate switch score table
+CellFateSwitch <- read.delim(paste0(Input_Dir, "/CellFateSwitch.txt"))
+
+# --------------------------------------------------------------
+# Statistics
+# --------------------------------------------------------------
+stat <-  CellFateSwitch %>%
+  t_test(switch_score ~ Group) %>%
+  add_xy_position(x = "Group")
+
+
+# --------------------------------------------------------------
+# Visualize transcriptional heterogeneity across Group (biological Age)
+# --------------------------------------------------------------
+ggplot(CellFateSwitch,
+       aes(x = Group, y = switch_score)) +
+ 
+  geom_violin(outliers = F, aes( fill = Group)) +
+  geom_point( aes( fill = Group), alpha = 0.5, shape = 21,
+              position= position_jitter(width = 0.1, height = 0))+
+  
+  stat_summary( geom = "point", fun.y = "mean",   
+                col = "black",  size = 3,  shape = 21,  fill = "black"  )+
+  stat_pvalue_manual(stat, label = "p", step.increase = 0.1) +
+  scale_fill_manual(values = c("#C0D69F", "#61980E"))+
+  theme_classic(base_size = 14) +
+  labs(y = "Distance to clone-centroid - RNA", x = "") +
+  theme(legend.position = "none")
+```
+
+
+
+
+##Fig 5e. Barplot +GAM - temporal progression FP acquisition
+
+
+
+```{r}
+# Load functional program assignment table
+df <-  read.delim(paste0(Input_Dir, "/FunctionalProgramAssignment.txt"))
+
+# Identify columns corresponding to FP assignments
+mp_cols <- grep("^Bin_MP", colnames(df), value = TRUE)
+
+# Compute number of FP active per cell
+df <- df %>%
+  mutate( n_MP = rowSums(across(all_of(mp_cols)),
+                   na.rm = TRUE)  )
+
+# -----------------------------
+# Prepare data for plotting
+# -----------------------------
+df_plot <- df %>%
+  #Remove control cells
+  dplyr::filter(!Group %in% c("Rosa", "CreN") ) %>% 
+
+  # Bin cells along pseudotime into deciles (10 equal groups)
+  mutate(   pt_bin = ntile(pseudotime, 10)  )
+
+# Keep only pseudotime bins with sufficient cell numbers (>= 50 cells)
+valid_bins <- df_plot %>%
+  count(pt_bin) %>%
+  dplyr::filter(n >= 50) %>%
+  pull(pt_bin)
+
+# Restrict analysis to valid bins and categorize MP usage per cell
+plot_df <- df_plot %>%
+  dplyr::filter(pt_bin %in% valid_bins) %>%
+  mutate(n_MP_group = case_when(n_MP %in% c(0) ~ "0",
+                                n_MP %in% c(1) ~ "1",
+                                n_MP %in% c(2, 3) ~ "2-3",
+                                TRUE ~ ">=4")) %>%
+  mutate(n_MP_group = factor(n_MP_group, levels = c("0", "1", "2-3", ">=4"))) %>%
+  count(pt_bin, n_MP_group) %>%
+  group_by(pt_bin) %>%
+  mutate(   # Normalize within each pseudotime bin (fraction of cells per category)
+    frac = n / sum(n)
+  )
+
+# -----------------------------
+# Visualization
+# -----------------------------
+
+
+ggplot(plot_df,
+       aes(x = pt_bin,   y = frac, fill = factor(n_MP_group))) +
+  geom_bar(stat = "identity",    color = "black",    linewidth = 0.2) +
+  scale_fill_manual(values = c("#eb6983", "#fbe1e6", "#dfd1d3", "#f6f6f6") %>% rev) +
+  theme(  axis.text.x = element_text(      angle = 45,  hjust = 1  ),   
+        legend.position = "right"  )+  
+  theme_classic() +
+  labs(fill = "# MPs")
+```
+
+```{r}
+df_test <- df_plot %>%
+  filter(pt_bin %in% c(1, 10)) %>%
+  mutate(
+    n_MP_group = case_when(
+      n_MP %in% c(0, 1) ~ "0-1",
+      n_MP >= 2         ~ ">=2"
+    )
+  )
+
+tab <- table(df_test$pt_bin, df_test$n_MP_group)
+
+tab
+chisq.test(tab)
+```
+
+
+```{r}
+library(mgcv)
+# -----------------------------------------
+# GAM analysis: does number od FPs change with pseudotime?
+# -----------------------------------------
+
+fit <- gam(n_MP ~ s(pseudotime),
+           family = poisson(),
+           data = df %>% dplyr::filter(!Group %in% c("Rosa", "CreN") ) ) 
+
+summary(fit)
+
+# Visualize fitted smooth relationship
+plot(fit)
+```
+
+## Fig 6e - test stat
+```{r}
+# ---------------------------------------------------------
+# Filter metadata and keep only selected conditions
+# ---------------------------------------------------------
+data_plot <- seurat@meta.data %>%
+  dplyr::filter(condition %in% c("CreP_EARLY",  "CreP_LATE", "CreN"))
+  
+# ---------------------------------------------------------
+# stats
+# ---------------------------------------------------------
+# KS test basal
+p_basal <- ks.test(
+  data_plot$DPT_K27_BLP_from_lp[
+    data_plot$condition %in% c("CreP_LATE", "CreP_EARLY") &
+      data_plot$annot_k27_joint == "basal"
+  ],
+  data_plot$DPT_K27_BLP_from_lp[
+    data_plot$condition %in% c("CreN", "Rosa") &
+      data_plot$annot_k27_joint == "basal"
+  ]
+)$p.value
+
+# KS test LP
+p_lp <- ks.test(
+  data_plot$DPT_K27_BLP_from_lp[
+    data_plot$condition %in% c("CreP_LATE", "CreP_EARLY") &
+      data_plot$annot_k27_joint == "LP"
+  ],
+  data_plot$DPT_K27_BLP_from_lp[
+    data_plot$condition %in% c("CreN", "Rosa") &
+      data_plot$annot_k27_joint == "LP"
+  ]
+)$p.value
+
+# Adjust p-values
+padj <- p.adjust(c(p_basal, p_lp), method = "BH")
+names(padj) <- c("basal", "LP")
+
+padj
+
+```
+```{r}
+# ---------------------------------------------------------
+# stats
+# ---------------------------------------------------------
+# KS test basal
+p_basal <- ks.test(
+  data_plot$DPT_K4_BLP_from_lp_int[
+    data_plot$condition %in% c("CreP_LATE", "CreP_EARLY") &
+      data_plot$annot_k4_joint == "basal"
+  ],
+  data_plot$DPT_K4_BLP_from_lp_int[
+    data_plot$condition %in% c("CreN", "Rosa") &
+      data_plot$annot_k4_joint == "basal"
+  ]
+)$p.value
+
+# KS test LP
+p_lp <- ks.test(
+  data_plot$DPT_K4_BLP_from_lp_int[
+    data_plot$condition %in% c("CreP_LATE", "CreP_EARLY") &
+      data_plot$annot_k4_joint == "LP"
+  ],
+  data_plot$DPT_K4_BLP_from_lp_int[
+    data_plot$condition %in% c("CreN", "Rosa") &
+      data_plot$annot_k4_joint == "LP"
+  ]
+)$p.value
+
+# Adjust p-values
+padj <- p.adjust(c(p_basal, p_lp), method = "BH")
+names(padj) <- c("basal", "LP")
+
+padj
+
+```
+
+
+
+
+## Fig 6h. Density - Pseudotime vs. cell fate
+
+```{r}
+# ---------------------------------------------------------
+# Filter metadata and keep only selected conditions
+# ---------------------------------------------------------
+data_plot <- seurat_rna@meta.data %>%
+  dplyr::filter(condition %in% c("CreP_EARLY",  "CreP_LATE", "CreN"))
+  
+# ---------------------------------------------------------
+# Keep only groups (annot_rna_joint_alv × condition)
+# with more than 50 cells
+# ---------------------------------------------------------
+
+keep_groups <- data_plot %>%
+  count(condition, annot_rna_joint_alv) %>%
+  dplyr::filter(n > 50) %>%
+  dplyr::select(condition, annot_rna_joint_alv)
+
+data_plot <- data_plot %>%
+  inner_join(keep_groups, by = c("condition", "annot_rna_joint_alv"))
+
+
+# ---------------------------------------------------------
+# Compute summary statistics per group
+# ---------------------------------------------------------
+stats <- data_plot %>%
+  group_by(annot_rna_joint_alv, condition) %>%
+  summarise(
+    mean = mean(pseudotime, na.rm = TRUE),
+    sd   = sd(pseudotime, na.rm = TRUE)
+  )
+
+# Create vertical offsets to avoid overlap
+stats <- stats %>%
+  group_by(condition) %>%
+  mutate(
+    y_pos = 1.02 + as.numeric(factor(annot_rna_joint_alv)) * 0.1
+  ) %>%
+  ungroup()
+
+# ---------------------------------------------------------
+# Plot pseudotime distributions per cell state and condition
+# ---------------------------------------------------------
+ggplot(data_plot,
+       aes(x = pseudotime, fill = annot_rna_joint_alv, colour = annot_rna_joint_alv)) +
+  geom_density( alpha = 0.6,    linewidth = 0.5,    adjust = 1.2  )+
+  geom_jitter(  aes(y = -0.1),   
+              height = 0.05,  width = 0,alpha = 0.3,  size = 0.7, show.legend = FALSE  ) +
+  geom_segment( data = stats,
+    aes(x = mean - sd,  xend = mean + sd, y = y_pos,yend = y_pos),  linewidth = 2 ) +
+  geom_point(  data = stats,
+               aes(x = mean, y = y_pos),   size = 3 ) +
+  
+  scale_fill_manual(values = cols_fate)+
+  scale_color_manual(values = cols_fate)+
+  labs(    x = "Pseudotime",    y = NULL,    fill = NULL,    colour = NULL  ) +
+  theme_classic(base_size = 18) +
+  theme(
+    legend.position = "top",
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank(),
+    panel.border = element_blank()  )+
+  facet_grid(condition ~.)
+```
+
+```{r}
+ks.test(
+  data_plot$pseudotime[data_plot$condition == "CreP_LATE" &
+                         data_plot$annot_rna_joint_alv == "basal"],
+  data_plot$pseudotime[data_plot$condition == "CreP_LATE"&
+                         data_plot$annot_rna_joint_alv == "LP"]
+)
+```
+
+## Fig 6i. Violin -  FP by Fate
+
+```{r}
+# Load functional program assignment table
+df <-  read.delim(paste0(Input_Dir, "/FunctionalProgramAssignment.txt"))
+
+# Identify columns corresponding to FP assignments
+mp_cols <- grep("^Bin_MP", colnames(df), value = TRUE)
+
+# Compute number of FP active per cell
+df <- df %>%
+  mutate( n_MP = rowSums(across(all_of(mp_cols)),
+                   na.rm = TRUE)  )
+# --------------------------------------------------------------
+# Statistics
+# --------------------------------------------------------------
+dat <- df %>%
+    filter( !Group %in% c("Rosa","CreN") ,
+             annot_rna_joint_alv %in% c(  "LP","Alv",  "basal"  ) )
+tuk <- dat %>%
+  dunn_test(n_MP ~ annot_rna_joint_alv, p.adjust.method = "BH") %>%
+  add_xy_position(x = "annot_rna_joint_alv")
+
+
+# --------------------------------------------------------------
+# Visualize Number of active FPs per cell across cell fate status
+# --------------------------------------------------------------
+
+ggplot(  df %>%filter( !Group %in% c("Rosa","CreN") ),
+  aes(    annot_rna_joint_alv,    n_MP )) +
+  geom_violin(aes(  fill = annot_rna_joint_alv ),    trim = FALSE  ) +
+  geom_boxplot(  aes(  fill = annot_rna_joint_alv ),  width = 0.12, outliers = F  ) +
+  
+  stat_compare_means(method = "kruskal",
+                     label.y = max(dat$n_MP, na.rm = TRUE) ) +
+  stat_pvalue_manual(tuk, label = "p.adj.signif", step.increase = 0.1,  
+                     xmin = "group1",xmax = "group2") +
+  
+  theme_classic(base_size = 14) +
+  scale_x_discrete(limits = c( "LP", "Alv", "basal") )+
+  scale_fill_manual(values =cols_fate )+
+  labs(    x = NULL,    y = "Number of active FPs per cell"  )+
+  guides(fill="none")
+```
+
+
+```{r}
+# --------------------------------------------------------------
+# Shannon entropy : Number of active FPs per cell across cell fate status
+# --------------------------------------------------------------
+library(entropy)
+
+score_cols <- grep("^Bin_MP", #on discrete values
+                    colnames(df),  value = TRUE)
+
+df$MP_entropy <- apply(  df[, score_cols],  1,
+                         
+  function(x){
+
+    x[is.na(x)] <- 0
+    x[x < 0] <- 0
+    if(sum(x) == 0){
+      return(0)
+    }
+
+    p <- x / sum(x)
+
+    entropy::entropy(p)
+  }
+)
+# --------------------------------------------------------------
+# Statistics
+# --------------------------------------------------------------
+dat <- df %>%
+    filter( !Group %in% c("Rosa","CreN") ,
+             annot_rna_joint_alv %in% c(  "LP","Alv",  "basal"  ) )
+tuk <- dat %>%
+  tukey_hsd(MP_entropy ~ annot_rna_joint_alv) %>%
+  add_xy_position(x = "annot_rna_joint_alv")
+
+# --------------------------------------------------------------
+# Visu
+# --------------------------------------------------------------
+ggplot(  df %>%
+    filter(!Group %in% c("Rosa","CreN"),
+             annot_rna_joint_alv %in% c(  "LP","Alv",  "basal"  )   ),
+  aes(    annot_rna_joint_alv,    MP_entropy )) +
+  geom_violin( aes(  fill = annot_rna_joint_alv ),   
+               trim = FALSE,    alpha = 0.8  ) +
+  geom_boxplot( aes(  fill = annot_rna_joint_alv ),   
+                width = .12,    outlier.shape = NA  ) +
+  stat_summary(    fun = median,    geom = "point",    size = 2  ) +
+  
+  stat_compare_means(method = "anova",
+                     label.y = max(dat$n_MP, na.rm = TRUE) ) +
+  stat_pvalue_manual(tuk, label = "p.adj.signif", step.increase = 0.1,  
+                     xmin = "group1",xmax = "group2") +
+  
+  
+  theme_classic(base_size = 14) +
+  labs(    x = NULL,    y = "MP entropy per cell"  )+
+  scale_x_discrete(limits = c( "LP", "Alv", "basal") )+
+  scale_fill_manual(values = cols_fate )+
+  guides(fill="none")
+
+```
+## Fig 6j. Radar - FP by Fate
+
+Note: requires running 0_Utils first
+
+```{r}
+
+# ------------------------------------------------------------
+# Load functional program assignment table
+# ------------------------------------------------------------
+df <-  read.delim(paste0(Input_Dir, "/FunctionalProgramAssignment.txt"))
+
+# Identify columns corresponding to FP assignments
+mp_cols <- grep("^Bin_MP", colnames(df), value = TRUE)
+
+# Compute number of FP active per cell
+df <- df %>%
+  mutate( n_MP = rowSums(across(all_of(mp_cols)),
+                   na.rm = TRUE)  )
+
+# -----------------------------
+# Prepare data for plotting
+# -----------------------------
+# Reshape data: long format (cell × functional program)
+df_long <- df %>%
+  select(SampleBio, annot_rna_joint_alv, umap1, umap2, all_of(hallmark_cols)) %>%
+  pivot_longer(
+    cols = all_of(hallmark_cols),
+    names_to = "MP",
+    values_to = "value"  ) %>%
+  filter(value == TRUE) 
+
+# Compute functional program frequency per cell (aka UMAP coordinate)
+df_pie <- df_long %>%
+  distinct(SampleBio, annot_rna_joint_alv, umap1, umap2, MP) %>%
+  count(umap1, umap2, MP, name = "n") %>%
+  group_by(umap1, umap2) %>%
+  mutate(freq = n / sum(n)) %>%
+  ungroup()
+
+
+# Convert to wide format (one column per functional program)
+df_wide <- df_pie %>%
+  pivot_wider(names_from = MP,  values_from = freq,   values_fill = 0  ) %>%
+  filter(  is.finite(umap1),    is.finite(umap2)  ) %>% 
+    left_join(# Add biosample & Group
+    df %>% select(SampleBio, annot_rna_joint_alv, Group, umap1, umap2),
+    by = c("umap1", "umap2")  )
+
+# Aggregate: mean FP activity per fate group
+df_sample <- df_wide %>%
+  group_by(annot_rna_joint_alv) %>%
+  summarise(across(  all_of(hallmark_cols),   ~ mean(.x , na.rm = TRUE) * 100    ), #% positive cell by hallmark
+    .groups = "drop"  )
+
+# Prepare radar plot input
+df_radar <- df_sample
+rownames(df_radar) <- df_radar$annot_rna_joint_alv
+
+df_radar <- df_radar[, c("annot_rna_joint_alv", hallmark_cols)]
+
+thr <- max(df_radar[, hallmark_cols], na.rm = TRUE)
+
+
+# ------------------------------------------------------------
+# Radar plot
+# ------------------------------------------------------------
+df_radar %>%
+  filter(!annot_rna_joint_alv  == "HS") %>%
+  ggradar_custom(
+  values.radar = c("0%", paste0(round(thr/2), "%"), paste0(round(thr), "%")),
+  group.line.width = 1,
+  group.point.size = 3,
+  background.circle.colour = "white",
+   group.colours = cols_fate,
+  gridline.mid.colour = "grey"
+)
+
+```
+
+
+## Control for Pgen
+### Ext Fig5h. Pgen - Intraclonal RNA heterogeneity
+```{r}
+# Load transcriptomic distance to clonal centroid ^Pgen table
+
+res_pgen_dist <- read.delim(paste0(Input_Dir, "/RNADistCentroid_Pgen.txt"))
+
+ggplot(subset(res_pgen_dist, is.na(ExpandedClone )==F), 
+       aes(x = -log10(threshold),  y = median_dist,   colour = ExpandedClone)) +
+  geom_line(size = 1) +
+  theme_classic() +
+   geom_text(aes(label = n_clones),
+    vjust = -1,    size = 3,    show.legend = FALSE  )+
+  scale_color_manual(values = c("#d0e0ea","#4384ac", "#0a334c") %>%rev)+
+  labs(x = "Maximum Pgen retained (-log10)",
+       y = "Mean distance to centroid")
+
+```
+
+
+### Ext fig5g. Pgen - FP by clone
+
+
+Median clone poly-functionality was then visualized as a function of increasingly stringent Pgen cutoffs.
+```{r}
+# Load Number of FP for each clone ^ Pgen table 
+res_pgen_MP <- read.delim(paste0(Input_Dir, "/FP_byClone_Pgen.txt"))
+
+
+ggplot(subset(res_pgen_MP,is.na(ExpandedClone)==F),
+       aes(x = -log10(threshold),   y = median_MP,   colour = ExpandedClone)) +
+  geom_line(size = 1) +
+  geom_point() +
+  geom_text(aes(label = n_clones),
+    vjust = -1,    size = 3,    show.legend = FALSE  )+
+    geom_vline(xintercept = 10**-3.8)+
+  scale_color_manual(values = c("#d0e0ea","#4384ac", "#0a334c") %>%rev)+
+  theme_classic() +
+  labs(x = "Maximum Pgen retained (-log10)",
+       y = "Mean distance to centroid")
+
+```
+### Ext Fig. 8c. Pgen - Cell Fate switch
+
+
+```{r}
+# Load cell Fate switch score ^ Pgen table 
+
+res_pgen <- read.delim(paste0(Input_Dir, "/CellFateSwitch_Pgen.txt"))
+
+
+# ------------------------------------------------------------
+# Plot switch score as a function of Pgen threshold
+# ------------------------------------------------------------
+
+ggplot(res_pgen,
+       aes(x = -log10(threshold))) +
+  geom_point(aes(y = mean_switch_Early,
+                colour = "Early")) +
+  geom_line(aes(y = mean_switch_Early,
+                colour = "Early")) +
+  geom_point(aes(y = mean_switch_Late,
+                colour = "Late")) +
+  geom_line(aes(y = mean_switch_Late,
+                colour = "Late")) +
+  
+  geom_text(aes(y = mean_switch_Early,label = n_Early),    vjust = -1,    size = 3,    show.legend = FALSE  )+
+  geom_text(aes(y = mean_switch_Late, label = n_Late),    vjust = -1,    size = 3,    show.legend = FALSE  )+
+  scale_color_manual(values = c("#C0D69F", "#61980E"))+
+  theme_classic()
+```
+
+
+
+# QC
+## Cell with barcodes
+```{r}
+dat <- data.frame(Lineag = seurat_rna$Barcode,
+                  Group = seurat_rna$Group,
+                  Mouse = seurat_rna$SampleBio)
+
+dat <- dat %>%
+  group_by(Mouse, Group) %>%
+  summarise(
+    N_Bcm = sum(!is.na(Lineag)),
+    pct_barcoded = mean(!is.na(Lineag)) * 100,
+    .groups = "drop"  )
+
+df_sum <- dat %>%
+  group_by(Group) %>%
+  summarise(
+    mean_pct = mean(pct_barcoded),
+    sd_pct = sd(pct_barcoded),
+    .groups = "drop"  )
+
+p_barcode <- ggplot(df_sum,
+                    aes(x = Group, y = mean_pct, fill = Group)) +
+  geom_bar(stat = "identity", color = "black", alpha = 0.7) +
+  geom_errorbar(
+    aes(ymin = mean_pct - sd_pct,
+        ymax = mean_pct + sd_pct),
+    width = 0.2  ) +
+  geom_jitter(    data = dat,
+    aes(x = Group, y = pct_barcoded),
+    width = 0.15,    size = 2,    alpha = 0.7,    inherit.aes = FALSE  ) +
+
+  scale_fill_manual(values = cols_Group) +
+  theme_classic() +
+  labs(    x = "",    y = "% cells with lineage barcode"  )
+
+p_barcode
+```
+
+
+## Number of clones
+```{r}
+dat <- data.frame(Lineag = seurat_rna$Barcode,
+                  Group = seurat_rna$Group,
+                  Mouse = seurat_rna$SampleBio)
+
+dat <- dat %>%
+   filter(Mouse %in% c("8415_G2-3", "8718_D2-3", "8964_G4")) %>%
+  group_by(Mouse, Group) %>%
+  summarise(
+    N_clones= length(unique(Lineag)),
+    .groups = "drop"  )
+
+df_sum <- dat %>%
+  filter(Mouse %in% c("8415_G2-3", "8718_D2-3", "8964_G4")) %>%
+  group_by(Group) %>%
+  summarise(
+    mean_pct = mean(N_clones),
+    sd_pct = sd(N_clones),
+    .groups = "drop"  )
+
+p_barcode <- ggplot(df_sum,
+                    aes(x = Group, y = mean_pct, fill = Group)) +
+  geom_bar(stat = "identity", color = "black", alpha = 0.7) +
+  geom_errorbar(
+    aes(ymin = mean_pct - sd_pct,
+        ymax = mean_pct + sd_pct),
+    width = 0.2  ) +
+  geom_jitter(    data = dat,
+    aes(x = Group, y = N_clones),
+    width = 0.15,    size = 2,    alpha = 0.7,    inherit.aes = FALSE  ) +
+
+  scale_fill_manual(values = cols_Group) +
+  theme_classic() +
+  labs(    x = "",    y = "Number of clones per gland"  )
+
+p_barcode
+```
+
+

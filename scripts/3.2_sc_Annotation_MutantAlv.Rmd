@@ -1,0 +1,204 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+```
+
+Analysis of pre-tumoral cell trajectories:
+
+All analyses described in the following section were performed exclusively on mutant cells derived from Cre-positive mice. This subset was used to reconstruct clonal dynamics and characterize the molecular changes associated with pre-tumoral progression.
+
+```{r}
+list_seu <- qs::qread(paste0("C:/Users/Marthe Laisne/Desktop/FlashSeq_MultiOneCell/Results/", "list_seu_SubsetwoTum_260115.qs" ))
+```
+
+#Clustering and cell fate annotation of scRNA-seq:
+Clusters were defined separately for Cre-positive cells, using Leiden clustering on the 40 first PCA dimension.  Clusters were annotated by computing, for each cell, the average RNA expression across external reference marker gene sets (Table XX).  Small non-epithelial clusters were removed. The final UMAP embedding, clustering, and annotation were then recomputed using epithelial cells only, on each subset, then added to the final merged object.
+
+
+```{r}
+seu_Epith_Pretum <- list_seu$RNA$RNA_GFPpos
+
+#to join layer need to set the assay on RNA
+seu_Epith_Pretum@active.assay = "RNA"
+seu_Epith_Pretum <- seu_Epith_Pretum %>% 
+                    #JoinLayers() %>% 
+                    SCTransform() %>% 
+                    RunPCA()
+
+
+seu_Epith_Pretum <- seu_Epith_Pretum %>% 
+                    RunUMAP(. , dims = 1:25) %>%  
+                    FindNeighbors(., dims = 1:25) 
+
+seu_Epith_Pretum <- seu_Epith_Pretum %>% 
+                    FindClusters(., resolution = 0.5)
+
+
+DimPlot(seu_Epith_Pretum, label = T)
+DimPlot(seu_Epith_Pretum, group.by = "ID1")
+DimPlot(seu_Epith_Pretum, group.by = "Group")
+```
+CellID Assignation
+
+```{r}
+new_names <- c("LP", "LP", "Alv", "LP", "Basal")
+names(new_names) <- levels(seu_Epith_Pretum)
+
+seu_Epith_Pretum <- RenameIdents(object = seu_Epith_Pretum, new_names)
+```
+
+
+Markers
+```{r}
+n_mark <- 72
+
+known_markers <- data.frame(species = rep("Mouse", n_mark) ,
+                            tissue = rep("Breast", n_mark) ,
+                            cancer = rep("Normal", n_mark) ,
+                            condition = rep("Normal Cell", n_mark) ,
+                            subtype1 = rep(NA, n_mark) ,
+                            subtype2 = rep(NA, n_mark) ,
+                            subtype3 = rep(NA, n_mark) ,
+                            resource = rep(NA, n_mark) ,
+                            pmid = rep(NA, n_mark) ,
+                            gene = c("Krt14", "Krt5", "Trp63","Snai2", "Cdh3",
+                                     "Col17a1","Acta2","Lgr5","Tagln", "Krt17",
+                                     "Myl9", "Mylk", "Myh11",
+                                     
+
+                                     "Dcn",  "Col1a1", "Pdgfra", "Vim", "Fap",
+                                     "Col3a1", "Lum", "Col15a1", "Col5a1", "Col1a2", 
+                                     "Loxl1",  "Fbln1",  "Fbln2", "Tnc","Pdgfra",
+                                     "Zeb1", "Zeb2", "Twist2",
+                                     
+                                     "Elf5", "Aldh1a3", "Kit", "Krt8", "Krt18", 
+                                     "Cd14","Tspan8", "Tnfrsf11a", "Sox10", "Ltf",
+                                     "Xbp1", "Wfdc18", "Lif", "Saa2", "Lcn2",
+                                     "Pigr", "Ncald", "Folr1", "Atp6v1b1", "Cldn1",
+                                     "Wfdc3", "Anpep","Foxi1", "Tspan33", "Plb1",
+                                     
+                                     "Esr1", "Pgr","Foxa1","Prlr" ,"Areg",
+                                    "Sox9",
+                                     "Cited1",  "Gata3", "Tbx3", "Fgfr2",
+                                     
+                                     "Csn2",  "Csn3", "Csn1s2a", "Csn1s1","Lalba","Wap"
+                                     ),
+                            
+                            celltype = c( "Basal", "Basal",  "Basal", "Basal",  "Basal",  
+                                          "Basal", "Basal", "Basal", "Basal","Basal",
+                                          "Basal","Basal","Basal",
+                                          
+                                        
+
+                                          "Fibro", "Fibro", "Fibro", "Fibro", "Fibro", 
+                                          "Fibro","Fibro", "Fibro","Fibro","Fibro", 
+                                          "Fibro","Fibro","Fibro","Fibro","Fibro",
+                                          "Fibro","Fibro","Fibro",
+                                          
+                                          "LP", "LP", "LP", "LP", "LP",
+                                          "LP", "LP", "LP", "LP", "LP",
+                                          "LP", "LP", "LP", "LP","LP",
+                                          "LP", "LP", "LP", "LP", "LP",
+                                          "LP", "LP", "LP", "LP","LP",
+                                          
+                                          "Lum_HS",
+                                          "Lum_HS","Lum_HS",  "Lum_HS", "Lum_HS","Lum_HS",
+                                          "Lum_HS","Lum_HS", "Lum_HS","Lum_HS",
+                                          
+                                          "Alv", "Alv", "Alv", "Alv", "Alv", "Alv"))
+```
+
+AUtommaed annotation with this package : https://cran.r-project.org/web/packages/scCATCH/vignettes/tutorial.html
+
+
+## Ext Fig 7b. - UMAP
+```{r}
+library(scCATCH)
+
+
+exp_matrix <-GetAssayData(object = seu_Epith_Pretum, slot = "scale.data") %>% as.matrix()
+cluster_vect <- Idents(seu_Epith_Pretum) %>% as.character()
+
+obj <- createscCATCH(data = exp_matrix, cluster = cluster_vect)
+
+# find highly expressed genes
+obj <- findmarkergene(object = obj, species = "Mouse", marker = known_markers, 
+                      tissue = "Breast", use_method = 1)
+obj <- findcelltype(object = obj)
+
+obj@celltype %>% print()
+
+
+  for (k in 1:nrow(obj@celltype)) {
+
+     b = obj@celltype$cell_type[k] 
+     names(b) = obj@celltype$cluster[k] %>% as.character()
+  
+    seu_Epith_Pretum<- RenameIdents(object = seu_Epith_Pretum,   b)
+  }
+
+
+palette <- c("Basal" = "#4EB7B4",
+             "LP"= "#E4722C", 
+             "Lum_HS" = "#EFB023", 
+             "Alv, LP" =  "#F7DCAD")
+
+
+  palette_here <- palette[names(palette) %in% levels(seu_Epith_Pretum)]
+  
+DimPlot(seu_Epith_Pretum,  label = T,
+        cols = palette_here)+
+  NoAxes()+ theme(legend.position = "top")
+
+
+```
+
+
+
+
+
+## Ext Fig 7b. - Dotplot
+
+
+```{r}
+features_plot <- c( "Krt5", "Krt14", "Krt17", "Trp63", "...",
+                   
+                   "Krt8", "Krt18","Aldh1a3", "Kit","Elf5", ".",
+                
+                   "Csn2",  "Csn3", "Csn1s2a","Lalba","Wap","....",
+                   
+                   "Cited1", "Areg", "Prlr", "Arg2")
+
+
+DotPlot(seu_Epith_Pretum,features = features_plot) +
+  geom_point(aes(size=pct.exp), shape = 21, colour="black", stroke=0.5)+
+  scale_colour_gradient2(low="#454b87", mid="lightgrey", high="#bd3106", limits = c(-1.5, 1.5)) +
+  scale_x_discrete(limits = rev(features_plot))+
+  scale_y_discrete(limits = c("Basal","LP", "Alv",  "HS"))+
+  guides(size=guide_legend(override.aes=list(shape=21, colour="black", fill="white")))+
+  coord_flip()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

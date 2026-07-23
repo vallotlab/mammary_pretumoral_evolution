@@ -1,0 +1,1332 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+library(data.table)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+
+library(Seurat)
+library(patchwork)
+library(DoubletFinder)
+
+library(ggplot2)
+library(gridExtra)
+library(ggExtra)
+library(viridis)
+library(Matrix)
+library("ggsci")
+library(cowplot)
+library(platetools)
+library(scales)
+library("gridExtra")
+library(ggpubr)
+library(RColorBrewer)
+library(tidyr)
+library(dplyr)
+library(ggforce)
+
+# Def Paths
+Input_Dir <- "C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/MiniBulkRNA/"
+Output_Dir <- "C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/MiniBulkRNA_Figures/"
+```
+
+
+
+
+# ######### Vizualisation: ######### 
+
+```{r}
+rna_seurat_umi_el <- qs::qread( paste0(Input_Dir, "rna_seurat_umi_el.qs") )
+
+cells_sub <- qs::qread( paste0(Input_Dir, "cells_sub.qs") )
+
+sig_pathways <- qs::qread( paste0(Input_Dir, "sig_pathways.qs") )
+pathways <- qs::qread( paste0(Input_Dir, "pathways.qs") )
+
+df_MiniBulk <- qs::qread( paste0(Input_Dir, "Pathways_MiniBulk.qs") )
+
+```
+
+## QC: Ext. Fig2 c-e
+
+Extended Fig2d:
+```{r}
+dat_plot <- rna_seurat_umi_el@meta.data
+
+
+ ggplot(dat_plot,
+         aes(x = CellNumber , y = log10(nCount_RNA))) +
+    ggpointdensity::geom_pointdensity(size = 4) +
+    scale_color_viridis_c(option = "magma") +
+    theme_classic(base_size = 12) +
+    guides(color="none")
+```
+
+Make dataset for vizu:
+```{r}
+pca_df <- Embeddings(rna_seurat_umi_el, "balanced_pca")[, 1:10] %>% as.data.frame()
+
+pca_df$BioSample <- rna_seurat_umi_el@meta.data$BioSample
+pca_df$Type <- rna_seurat_umi_el@meta.data$Stage
+pca_df$Age <- rna_seurat_umi_el@meta.data$Age
+pca_df$Ncell <- rna_seurat_umi_el@meta.data$CellNumber
+pca_df$plate <- rna_seurat_umi_el@meta.data$Plate_Source
+pca_df$CellType <- rna_seurat_umi_el@meta.data$CellType
+pca_df$Nreads <- rna_seurat_umi_el@meta.data$nCount_RNA
+pca_df$SampleName <- rna_seurat_umi_el@meta.data$SampleName
+
+pca_df$Mouse <- rna_seurat_umi_el@meta.data$Mouse %>% as.character()
+
+pca_df$Nclone <- rna_seurat_umi_el@meta.data$n_barcode
+pca_df$MaxCloneFraction <- rna_seurat_umi_el@meta.data$max_barcode_fraction
+pca_df$BCM_major <- rna_seurat_umi_el@meta.data$BCM_major
+pca_df$Juxta_Not <-rna_seurat_umi_el@meta.data$Juxta_Not %>% as.character()
+pca_df$pseudotime <-rna_seurat_umi_el@meta.data$pseudotime 
+
+col_mouse <- sample(colorRampPalette(brewer.pal(8, "Spectral"))(30))
+```
+
+##Extended 4b-c. PCA
+
+
+```{r}
+
+l_plots <- list(
+ggplot(pca_df[cells_sub, ], aes(x = BPC_1, y = BPC_3)) +
+  geom_point(size = 4, alpha = 0.5,
+             aes(shape = Juxta_Not, fill = BioSample)) +
+  theme_classic() + 
+  scale_shape_manual(values = c(21, 24))+
+  scale_fill_manual(values = col_mouse)+
+  labs(title = "Balanced PCA - BioSample - sub",   x = "BPC1", y = "BPC3")+
+ggplot(pca_df, aes(x = BPC_1, y = BPC_3)) +
+  geom_point(size = 4, alpha = 0.5,
+             aes(shape = Juxta_Not, fill = BioSample)) +
+  theme_classic() + 
+  scale_shape_manual(values = c(21, 24))+
+  scale_fill_manual(values = col_mouse)+
+  labs(title = "Balanced PCA - BioSample",  x = "BPC_1", y = "BPC3"),
+
+ggplot(pca_df[cells_sub, ], aes(x = BPC_1, y = BPC_3)) +
+  geom_point(size = 4, alpha = 0.5,
+             aes(shape = Juxta_Not, fill = Mouse)) +
+  theme_classic() + 
+  scale_shape_manual(values = c(21, 24))+
+  scale_fill_manual(values = col_mouse)+
+  labs(title = "Balanced PCA - Mouse - sub",   x = "BPC1", y = "BPC3")+
+ggplot(pca_df, aes(x = BPC_1, y = BPC_3)) +
+  geom_point(size = 4, alpha = 0.5,
+             aes(shape = Juxta_Not, fill = Mouse)) +
+  theme_classic() + 
+  scale_shape_manual(values = c(21, 24))+
+  scale_fill_manual(values = col_mouse)+
+  labs(title = "Balanced PCA - Mouse",  x = "BPC_1", y = "BPC3"),
+
+
+
+ggplot(pca_df[cells_sub, ], aes(x = BPC_1, y = BPC_3)) +
+  geom_point(size = 4, alpha = 0.5,
+             aes(shape = Juxta_Not, fill = plate)) +
+  theme_classic() + 
+  scale_shape_manual(values = c(21, 24))+
+  scale_fill_manual(values = (colorRampPalette(brewer.pal(8, "Spectral"))(5)))+
+  labs(title = "Balanced PCA - plate - sub",   x = "BPC1", y = "BPC3")+
+ggplot(pca_df, aes(x = BPC_1, y = BPC_3)) +
+  geom_point(size = 4, alpha = 0.5,
+             aes(shape = Juxta_Not, fill = plate)) +
+  theme_classic() + 
+  scale_shape_manual(values = c(21, 24))+
+  scale_fill_manual(values = (colorRampPalette(brewer.pal(8, "Spectral"))(5)))+
+  labs(title = "Balanced PCA - plate",   x = "BPC_1", y = "BPC3"),
+
+
+ggplot(pca_df[cells_sub, ], aes(x = BPC_1, y = BPC_3)) +
+  geom_point(size = 4, alpha = 0.5,color = "black",
+             aes(shape = Juxta_Not, fill = Age)) +
+  theme_classic() + 
+  scale_shape_manual(values = c(21, 24))+
+  scale_fill_gradientn(  colours = c("white", "#C0D69F", "#61980E", "grey10") , 
+                         na.value = "white", limits = c(0, 8)  )+
+  labs(title = "Balanced PCA - Age - sub",   x = "BPC1", y = "BPC3")+
+ggplot(pca_df, aes(x = BPC_1, y = BPC_3)) +
+  geom_point(size = 4, alpha = 0.5,color = "black",
+             aes(shape = Juxta_Not, fill = Age)) +
+  theme_classic() + 
+  scale_shape_manual(values = c(21, 24))+
+  scale_fill_gradientn(  colours = c("white", "#C0D69F", "#61980E", "grey10") , 
+                         na.value = "white", limits = c(0, 8)  )+
+  labs(title = "Balanced PCA - Age",  x = "BPC_1", y = "BPC3"),
+
+
+
+ggplot(pca_df[cells_sub, ], aes(x =BPC_1, y = BPC_3, fill = Nclone, shape = Juxta_Not)) +
+  geom_point(size = 4, color="black", alpha = 0.5,
+             position = position_jitter(width = 0, heigh=0)) +
+  theme_classic() +
+  scale_shape_manual(values = c(21,24,  23))+
+  scale_fill_gradientn(  colours = c("white", "#E03932", "grey10") , 
+                         na.value = "white"  )+
+  labs(title = "Balanced PCA - Nclone - sub",       x = "BPC1", y = "BPC3")+
+ggplot(pca_df, aes(x = BPC_1, y = BPC_3, fill = Nclone, shape = Juxta_Not)) +
+  geom_point(size = 4, color="black", alpha = 0.5,
+             position = position_jitter(width = 0, heigh=0)) +
+  theme_classic() +
+  scale_shape_manual(values = c(21,24,  23))+
+  scale_fill_gradientn(  colours = c("white", "#E03932", "grey10") , 
+                         na.value = "white"  )+
+  labs(title = "Balanced PCA - Nclone",       x = "BPC_1", y = "BPC3"),
+
+
+ggplot(pca_df[cells_sub, ], aes(x = BPC_1, y = BPC_3, fill = Ncell, shape = Juxta_Not)) +
+  geom_point(size = 4, color="black", alpha = 0.5,
+             position = position_jitter(width = 0, heigh=0)) +
+  theme_classic() +
+  scale_shape_manual(values = c(21,24,  23))+
+  scale_fill_gradientn(  colours = c("white", "#eba00a", "grey10") , 
+                         na.value = "white" , limits = c(0, 100) )+
+  labs(title = "Balanced PCA - Ncell - sub",
+       x = "BPC1", y = "BPC3")+
+ggplot(pca_df, aes(x = BPC_1, y = BPC_3, fill = Ncell, shape = Juxta_Not)) +
+  geom_point(size = 4, color="black", alpha = 0.5,
+             position = position_jitter(width = 0, heigh=0)) +
+  theme_classic() +
+  scale_shape_manual(values = c(21,24,  23))+
+  scale_fill_gradientn(  colours = c("white", "#eba00a", "grey10") , 
+                         na.value = "white"  , limits = c(0, 100) )+
+  labs(title = "Balanced PCA - Ncell",
+       x = "BPC_1", y = "BPC3"))
+
+l_plots
+```
+
+
+##Fig2a. Visualization of pseudotime
+
+```{r}
+l_plots <- list( 
+  
+   # Age vs pseudotime relationship
+ggplot(pca_df, aes( x = Age, y =pseudotime)) +
+  geom_point(size = 4, alpha = 0.5,color = "black",
+             aes(shape = Juxta_Not, fill = Mouse),
+             position = position_jitter(width = 0.1, height = 0)) +
+  geom_smooth( method = "loess", 
+               color = "black", se = FALSE) +
+  theme_classic() + 
+  scale_shape_manual(values = c(21, 24))+
+  scale_fill_manual(values = col_mouse) +
+  geom_hline(yintercept =  c(2, 5.5)) +
+  
+  
+  # PCA colored by pseudotime
+ggplot(pca_df, aes(x = BPC_1, y = BPC_3, fill = pseudotime)) +
+  geom_point(size = 4, alpha = 0.6, color = "black",
+             aes(shape = Juxta_Not)) +
+  theme_classic() +
+  scale_shape_manual(values = c(21, 24)) +
+    scale_fill_gradientn(
+    colours = c("white", "#9f97c8", "#514495", "#231e47", "grey10"),
+    values = rescale(seq(min(pca_df$pseudotime, na.rm = TRUE),
+                         max(pca_df$pseudotime, na.rm = TRUE),
+                         length.out = 5)) )+
+  
+      # Same plot restricted to subsampled cells
+ggplot(pca_df[cells_sub, ], aes(x = BPC_1, y = BPC_3, fill = pseudotime)) +
+  geom_point(size = 4, alpha = 0.6, color = "black",
+             aes(shape = Juxta_Not)) +
+  theme_classic() +
+  scale_shape_manual(values = c(21, 24)) +
+    scale_fill_gradientn(
+    colours = c("white", "#9f97c8", "#514495", "#231e47", "grey10"),
+    values = rescale(seq(min(pca_df$pseudotime, na.rm = TRUE),
+                         max(pca_df$pseudotime, na.rm = TRUE),
+                         length.out = 5)) )
+
+
+)
+```
+
+
+```{r}
+wrap_plots(l_plots, ncol = 1)
+```
+
+## Fig2b. Clonal composition: Donut by mouse
+
+```{r}
+# Extract PCA coordinates (balanced PCA: PC1 vs PC3)
+pca <- Embeddings(rna_seurat_umi_el, "balanced_pca")[,c(1, 3)] |>
+  as.data.frame() |>
+  tibble::rownames_to_column("SampleName")
+
+# Retrieve Seurat metadata
+mm_meta <- rna_seurat_umi_el@meta.data
+mm_meta$SampleName = rownames(mm_meta)
+
+# Merge PCA coordinates with metadata
+meta_plot <- mm_meta |>
+  left_join(pca, by = "SampleName")
+
+```
+Global functions for visualization
+```{r}
+col_bcm <- sample(colorRampPalette(brewer.pal(8, "Spectral"))(550))
+
+# -------------------------------
+#1. PCA visualization per mouse
+# -------------------------------
+plot_mouse_points <- function(df, mouse_id){
+
+  df_mouse <- df |> dplyr::filter(Mouse == mouse_id)
+  Age <- unique(df_mouse$Age)
+
+  ggplot() +
+
+    # Background: all cells (grey reference)
+    geom_point(  data = df,
+      aes(BPC_1, BPC_3),
+      color = "grey90",  size = 2  ) +
+
+   # Highlight selected mouse
+    geom_point( data = df_mouse,
+      aes(  BPC_1, BPC_3,  fill = Gland), 
+      alpha = 0.9, shape = 21 )  +  
+    theme_classic() + 
+    ggtitle(paste("Mouse", mouse_id, Age, "months"))
+}
+
+# -------------------------------
+#2. Construction of clonal arc coordinates (donut geometry)
+# -------------------------------
+make_donut_df <- function(df_mouse){
+
+  df_mouse %>%
+    mutate(sample_id = row_number()) %>%
+    unnest(c(BCM_LVmerged_list, fraction_list)) %>%
+    
+     # Compute cumulative angular positions for each clone fraction
+    group_by(sample_id) %>%
+    mutate(
+      end = 2*pi*cumsum(fraction_list),
+      start = lag(end, default = 0)  ) %>%
+    ungroup()
+}
+
+# -------------------------------
+#3. PCA embedding with clonal donut overlays
+# -------------------------------
+plot_mouse_donuts <- function(df, mouse_id){
+
+  df_mouse <- df %>% filter(Mouse == mouse_id)
+
+  donut_df <- make_donut_df(df_mouse)
+  Age <- unique(df_mouse$Age)
+  ggplot() +
+    # Background PCA
+    geom_point(  data = df,
+      aes(BPC_1, BPC_3),
+      color = "grey90",    size = 2) +
+    # Clonal composition displayed as donut sectors
+    geom_arc_bar(
+      data = donut_df,
+      aes(x0 = BPC_1,  y0 = BPC_3,  r0 = 0,  r = 2,   
+        start = start,    end = end,  fill = BCM_LVmerged_list  ),  color = NA  ) +
+    coord_equal() +
+    scale_fill_manual(values =col_bcm)+
+    theme_classic() +theme(legend.position = "none")+
+    labs(title = paste("Mouse", mouse_id, Age, "months"))
+}
+
+
+
+# -------------------------------
+#4. Grid representation (mouse × sample structure)
+# -------------------------------
+plot_pie_grid <- function(df, mouse_id){
+
+  df_mouse <- df %>% dplyr::filter(Mouse == mouse_id)
+
+  donut_df <- make_donut_df(df_mouse)
+
+   # Convert categorical variables into grid coordinates
+  donut_df <- donut_df %>%
+    mutate(
+      x = as.numeric(factor(Gland)),
+      y = as.numeric(factor(CellID ))
+    )
+
+  ggplot(donut_df) +
+    geom_arc_bar( aes(x0 = x,   y0 = y,  r0 = 0,r = 0.45,   start = start,  end = end,
+        fill = BCM_LVmerged_list  ),color = NA) +
+    scale_x_continuous(
+      breaks = unique(donut_df$x),
+      labels = unique(donut_df$Gland)    ) +
+    scale_y_continuous(
+      breaks = unique(donut_df$y),
+      labels = unique(donut_df$CellID )    ) +
+    coord_equal() +
+    theme_classic() +
+    labs(x = "Gland", y = "MiniBulk") +
+    scale_fill_manual(values = col_bcm)+
+    theme(legend.position = "none")
+}
+
+# -------------------------------
+#5. Combined multi-panel visualization
+# -------------------------------
+plot_mouse_combined <- function(df, mouse_id){
+
+  p_mid <- plot_mouse_points(meta_plot, mouse)
+  p_left  <- plot_mouse_donuts(df, mouse_id)
+  
+  p_right <- plot_pie_grid(df, mouse_id)
+
+  p_left | p_mid + p_right 
+}
+```
+
+
+Iteration over all mice
+```{r}
+for (mouse in unique(meta_plot$Mouse)) {
+
+  print(plot_mouse_combined(meta_plot, mouse))
+
+}
+```
+
+```{r}
+
+clones_per_sample <- meta_plot %>%
+  unnest(BCM_LVmerged_list) %>%
+  group_by(BioSample) %>%
+  summarise(n_clones = n_distinct(BCM_LVmerged_list))
+
+clones_per_sample %>% left_join(rna_seurat_umi_el@meta.data[, c("BioSample", "Age")], by = "BioSample") %>% distinct
+```
+
+##Fig2c. Barcode and transcriptomic diversities through pseudotime
+Figure 2c
+
+```{r}
+library(rstatix)
+library(ggpubr)
+
+data <- data.frame(pseudotime = rna_seurat_umi_el$pseudotime,
+                   Cluster = rna_seurat_umi_el$Group_PT,
+                   BarcodeDiversity = rna_seurat_umi_el$shannon_barcode_index,
+                   TranscriptoimcDiversity = rna_seurat_umi_el$Distance_to_Biosample_Centroid,
+                   Juxta_Not = rna_seurat_umi_el$Juxta_Not,
+                   Ncells = rna_seurat_umi_el$CellNumber,
+                   BioSample = rna_seurat_umi_el$BioSample,
+                   SampleName = rna_seurat_umi_el$SampleName,
+                   mouse = rna_seurat_umi_el$Mouse %>% as.factor)
+
+df <- data %>%
+  subset(Ncells == 100 & is.na(BioSample)==F)
+
+# Tukey test
+tuk <- df %>%
+  tukey_hsd(BarcodeDiversity ~ Cluster) %>%
+  add_xy_position(x = "Cluster")
+
+
+g1 <- ggplot(df, aes(x = Cluster, y = BarcodeDiversity)) +
+  geom_boxplot(aes(fill = Cluster), outliers = FALSE, color = "black") +
+  geom_point(aes(shape = Juxta_Not, fill = Cluster),
+             size = 1, alpha = 0.5, color = "black",
+             position = position_jitter(width = 0.1, height = 0)) +
+  stat_compare_means(method = "anova",
+                     label.y = max(df$BarcodeDiversity, na.rm = TRUE) * 1.5) +
+  stat_pvalue_manual(tuk, label = "p.adj.signif", step.increase = 0.1,  xmin = "group1",
+  xmax = "group2") +
+  scale_shape_manual(values = c(21, 24)) +
+  scale_fill_manual(values = (colorRampPalette(brewer.pal(4, "Spectral"))(4))[c(1,2,3)]) +
+  theme_classic() +
+  theme(legend.position = "none")
+
+
+tuk2 <- df %>%
+  tukey_hsd(TranscriptoimcDiversity ~ Cluster) %>%
+  add_xy_position(x = "Cluster")
+
+g2 <- ggplot(df, aes(x = Cluster, y = TranscriptoimcDiversity)) +
+  geom_boxplot(aes(fill = Cluster), outliers = FALSE, color = "black") +
+  geom_point(aes(shape = Juxta_Not, fill = Cluster),
+             size = 1, alpha = 0.5, color = "black",
+             position = position_jitter(width = 0.1, height = 0)) +
+  stat_compare_means(method = "anova",
+                     label.y = max(df$TranscriptoimcDiversity, na.rm = TRUE) * 1.5) +
+  stat_pvalue_manual(tuk2, label = "p.adj.signif", step.increase = 0.1,  xmin = "group1",
+  xmax = "group2") +
+   scale_shape_manual(values = c(21, 24))+
+  scale_fill_manual(values = (colorRampPalette(brewer.pal(4, "Spectral"))(4))[c(1,2,3)])+
+    theme_classic() +  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "none"  )
+
+g1 + g2
+```
+
+
+```{r}
+library(ggpubr)
+
+g1 <- data %>%
+  subset(Ncells ==100 & is.na(BioSample)==F) %>%
+  subset(SampleName %in% cells_sub) %>%
+  ggplot( aes(x = pseudotime, y = BarcodeDiversity)) +
+  geom_point(aes(shape = Juxta_Not, fill = mouse), 
+             size = 2,  alpha = 0.5, color = "black",
+             position = position_jitter(width = 0.1, heigh=0)) +
+   geom_smooth(method = "lm", color = "black", se = FALSE) +
+  stat_cor(method = "spearman",
+           label.x = Inf, label.y = Inf, hjust = 1.5, vjust = 1.5,   size = 4) +
+  scale_shape_manual(values = c(21, 24)) +
+  scale_fill_manual(values = col_mouse) +
+  theme_classic() +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "none")
+
+
+g2 <- data %>%
+  subset(Ncells ==100 & is.na(BioSample)==F) %>%
+  subset(SampleName %in% cells_sub) %>% 
+  ggplot(aes(x = pseudotime, y = TranscriptoimcDiversity)) +
+  geom_point(aes(shape = Juxta_Not, fill = mouse), 
+             size = 2,  alpha = 0.5, color = "black",
+             position = position_jitter(width = 0.1, heigh=0)) +
+   geom_smooth(method = "lm", color = "black", se = FALSE) +
+  stat_cor(method = "spearman",
+           label.x = Inf, label.y = Inf, hjust = 1.6, vjust = 1.5, size = 4) +
+  scale_shape_manual(values = c(21, 24)) +
+  scale_fill_manual(values = col_mouse) +
+  theme_classic() +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "none")
+
+g1 + g2
+```
+
+##Fig2d. Pathway score heatmaps
+
+Figure 2d
+
+```{r}
+#Extract score
+meta <- rna_seurat_umi_el@meta.data
+colnames(meta) <- gsub("1$", "", colnames(meta))
+colnames(meta)[colnames(meta) %in% c("Basal_Score"  , "LP_Score"  ,"Luminal H-S_Score"  )] <- c("Basal", "LP", "Luminal H-S")
+
+score_mat <- meta |>
+  dplyr::select(dplyr::any_of(sig_pathways))
+
+score_mat <- score_mat[rownames(meta), ]
+
+#Annot tumor bearing
+meta$Tm_Bearing <- meta$Juxta_Not
+```
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+# palette Age
+age_col_fun <- colorRamp2(
+  seq(min(meta$Age), max(meta$Age), length.out = 4),
+  c("white", "#C0D69F", "#61980E", "grey10"))
+
+pseudoT_col_fun <- colorRamp2(
+  seq(min(meta$pseudotime, na.rm = T)+1, max(meta$pseudotime, na.rm = T)+1, length.out = 5),
+  c("white", "#9f97c8", "#514495", "#231e47", "grey10"))
+
+Clusters_col <- setNames(  colorRampPalette(brewer.pal(4, "Spectral"))(4)[1:3],
+  levels(factor(meta$Group_PT)))
+  
+
+# palette Shannon 
+shannon_col_fun <- colorRamp2(
+  seq(min(meta$shannon_barcode_index, na.rm = T), max(meta$shannon_barcode_index, na.rm = T), length.out = 4),
+  c("white", "grey70", "grey30", "grey10"))
+
+# palette distance
+Distance_col_fun <- colorRamp2(
+  seq(min(meta$Distance_to_Biosample_Centroid, na.rm = T), max(meta$Distance_to_Biosample_Centroid, na.rm = T), length.out = 4),
+  c("white", "grey70", "grey30", "grey10"))
+
+
+
+#  Tm_Bearing (facteur)
+tm_levels <- unique(meta$Tm_Bearing)
+
+tm_cols <- setNames(  c( "grey10", "grey50", "grey95")[seq_along(tm_levels)],   tm_levels)
+
+# --- Mouse (facteur)
+mouse_levels <- unique(meta$Mouse)
+
+mouse_cols <- setNames(  colorRampPalette(brewer.pal(8, "Spectral"))(length(mouse_levels)),
+  mouse_levels)
+
+# --- Annotation heatmap
+age_anno <- HeatmapAnnotation(
+  pseudoT = meta$pseudotime,
+  Shannon = meta$shannon_barcode_index,
+  Cluster = meta$Group_PT,
+  Age = meta$Age,
+  Tm_Bearing = meta$Tm_Bearing,
+ 
+  Mouse = as.character(meta$Mouse),
+  
+ 
+  col = list(
+    Shannon = shannon_col_fun,
+    Cluster = Clusters_col,
+    Tm_Bearing = tm_cols,
+    Mouse = mouse_cols,
+    pseudoT = pseudoT_col_fun,
+    Age = age_col_fun),
+  
+  annotation_name_side = "left")
+
+
+
+############# Heatmap
+heatmap_palette <- c( rev( c("grey99","#E9F2FC", "#C1DAF6",  "#99C1F0", "#71A9EA", "#4991E4", "#3283E0", "#1B63B6", "#154E8E", "#0F3866") )
+  ,"grey99", "#FCE9F2", "#F6C1DA", "#F099C1", "#EA71A9",  "#E44991", "#E03283", "#B61B63", "#8E154E",  "#660F38")
+
+heatmap_col_fun <- colorRamp2(
+  seq(-2, 2, length.out = length(heatmap_palette)),
+  heatmap_palette)
+
+
+```
+
+
+```{r}
+age_anno_sub <- HeatmapAnnotation(
+  pseudoT = meta$pseudotime[rownames(meta) %in% cells_sub],
+  Shannon = meta$shannon_barcode_index[rownames(meta) %in% cells_sub],
+  Distance = meta$Distance_to_Biosample_Centroid[rownames(meta) %in% cells_sub],
+
+  Age = meta$Age[rownames(meta) %in% cells_sub],
+  Tm_Bearing = meta$Tm_Bearing[rownames(meta) %in% cells_sub],
+ 
+  Mouse = as.character(meta$Mouse)[rownames(meta) %in% cells_sub],
+  
+ 
+  col = list(
+    Shannon = shannon_col_fun,
+    Distance = Distance_col_fun, 
+    pseudoT =pseudoT_col_fun,
+    Tm_Bearing = tm_cols,
+    Mouse = mouse_cols,
+    Age = age_col_fun),
+  
+  annotation_name_side = "left")
+
+Heatmap(
+  t(scale(score_mat[rownames(meta) %in% cells_sub,  ], center = TRUE, scale = TRUE)),
+  name = "Pathway score",
+  top_annotation = age_anno_sub,
+  col = heatmap_col_fun,
+  column_order = order(meta$pseudotime[rownames(meta) %in% cells_sub]), # Order according to pseudot
+  cluster_columns = F,
+  cluster_rows = TRUE,
+  clustering_distance_rows = "euclidean",
+  clustering_method_rows = "ward.D2",
+  show_column_names = FALSE,
+  row_names_gp = gpar(fontsize = 8) )
+
+```
+
+
+##Fig2e. Boxplots DEGs of interest
+
+For Figure 2e & extended Fig. 4 i
+
+```{r}
+genes_of_interest <- c("Krt14", "Acta2", "Trp63","Zeb1","Snai1", "Twist1",
+                       "Tspan8",  "Kit","Csn2","Wap", "Elf5","Bcl11b",  "Procr","Lgr5",
+                       "Sox14", "Foxi1","Hey1", 
+                       "Col1a2", "Vim","Serpine1","Mmp3",
+                       
+                       "Apobec3", "Rnase1", "Cox7b", "Cox7c",
+                       "Deptor", "Gas5", "Igfbp5", "Irs1",
+                       "Irf7", "Oasl1", "Parp14", "Isg15", "Fancd2",
+                       "Tmem173", "Cgas", "Tbk1",
+                       "Tlr3", "Hes1", "Bcl11a",
+                       
+                       "Il10", "Ccl9","Il23a", "Cd73", "Il6", "Irf3","Tnfrsf12a",
+                       "Ccl7", "Il18r1","Csf1", "Ccl2","Cxcl2","Slpi","Cd74",
+                       "Tgtp1", "Tgtp2", "Itgp",
+                       
+                       "Pdcd1", "Cxcl10", "Ctla4","Cxcl12","Cd73",
+                       "H2-Aa","H2-Ab1", "Cd74","Hba-a1",
+                       "Irs1", "B2m",
+                       "Kdm6b", "Setdb1", "Crabp1",
+                       "Fabp4",  "Chac1", "Cd36")
+
+genes_of_interest <- intersect(
+  genes_of_interest,
+  rownames(rna_seurat_umi_el)
+)
+
+expr_mat <- GetAssayData(rna_seurat_umi_el, slot = "data")
+
+df_plot <- as.data.frame(t(expr_mat[genes_of_interest, ]))
+df_plot$Mouse <- rna_seurat_umi_el@meta.data$Mouse %>% as.character()
+df_plot$Nclone <- rna_seurat_umi_el@meta.data$n_barcode
+
+df_plot$Cluster <- rna_seurat_umi_el@meta.data$Group_PT
+df_plot$BioSample <- rna_seurat_umi_el@meta.data$BioSample
+df_plot$plate <- rna_seurat_umi_el@meta.data$Plate_Source
+df_plot$pseudotime <- rna_seurat_umi_el@meta.data$pseudotime
+
+
+df_plot <- df_plot %>%
+  mutate(Juxta_Not = case_when(plate %in% c("LatePlq1", "LatePlq2") & 
+                                 BioSample != "9341_G4MixedGFPpos" ~ "Jx",
+                               TRUE ~ "Gl"))
+
+
+
+
+df_long <- df_plot |>
+  pivot_longer(
+    cols = all_of(genes_of_interest),
+    names_to = "Gene",
+    values_to = "Expression"
+  )
+
+df_long$Gene <- factor(df_long$Gene, levels = genes_of_interest)
+
+
+
+ggplot(df_long, aes(x = Cluster, y = Expression, fill = Cluster)) +
+  geom_boxplot(notch = F, outliers = F, color = "black")+
+  geom_point(aes(shape = Juxta_Not), 
+             size = 1,  alpha = 0.5, color = "black",
+             position = position_jitter(width = 0.1, heigh=0)) +
+   scale_shape_manual(values = c(21, 24))+
+  scale_color_manual(values =  c("white", "#C0D69F", "#61980E", "grey10"))+
+  scale_fill_manual(values =  c("white", "#C0D69F", "#61980E", "grey10"))+
+  scale_x_discrete(limits = c("E1","E2", "L")) +
+  
+  facet_wrap(~ Gene, scales = "free_y", ncol = 4) +
+  theme_classic() +  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "none"  )
+
+```
+
+
+
+## Ext4g. PCA - Pathways assignments
+```{r}
+df_MiniBulk$BPC1 <-Embeddings(rna_seurat_umi_el , "balanced_pca")[, 1]
+df_MiniBulk$BPC3 <- Embeddings(rna_seurat_umi_el , "balanced_pca")[, 3]
+df_MiniBulk$pseudotime <- rna_seurat_umi_el$pseudotime
+
+
+#Pathways annotation grouping
+df_MiniBulk <- df_MiniBulk %>% 
+  mutate(state_max_relev = case_when(state_max %in% c( "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION", "HALLMARK_MYOGENESIS"  ) ~ "EMT",
+                                     state_max %in% c("HALLMARK_ANGIOGENESIS", "HALLMARK_HYPOXIA"  ) ~ "Angiogenesis", 
+                                     state_max %in% c("HALLMARK_COAGULATION"  ) ~ "Coagulation",
+                                     state_max %in% c( "HALLMARK_APOPTOSIS" ,  "HALLMARK_P53_PATHWAY"  ,"HALLMARK_UNFOLDED_PROTEIN_RESPONSE" ,"HALLMARK_XENOBIOTIC_METABOLISM"  ) ~ "Stress",
+                                     state_max %in% c( "HALLMARK_INTERFERON_GAMMA_RESPONSE" ,  "HALLMARK_INTERFERON_ALPHA_RESPONSE" ) ~ "Interferons",
+                                      state_max %in% c( "HALLMARK_E2F_TARGETS" , "HALLMARK_G2M_CHECKPOINT"   ,   "HALLMARK_MITOTIC_SPINDLE") ~ "CellCycle",
+                                     state_max == "HALLMARK_KRAS_SIGNALING_UP" ~"Kras",
+                                     state_max == "HALLMARK_ADIPOGENESIS" ~"Adipogenesis",
+                                     state_max == "HALLMARK_MTORC1_SIGNALING" ~"mTorC1",
+                                     state_max == "HALLMARK_TNFA_SIGNALING_VIA_NFKB" ~"TNFa_NFkB",
+                                      state_max == "HALLMARK_MYC_TARGETS_V1" ~"Myc",
+                                     TRUE ~ state_max))
+
+state_colors <- c(
+  "Adipogenesis" = "#FFBF50FF", 
+  "Angiogenesis" = "#1F83B4FF",  
+  "CellCycle"    = "#8A60B0FF",  
+  "Coagulation"  = "#12A2A8FF", 
+  "EMT"          = "#2CA030FF",  
+  "Interferons"  = "#D63A3AFF",  
+  "Kras"         = "#C7519CFF",  
+  "mTorC1"       = "#BA43B4FF",  #
+  "Myc"          = "#6F63BBFF",  
+  "Stress"       = "#BCBD22FF",  
+  "TNFa_NFkB"    = "#FF7F0EFF",  
+  "Unknown"      = "#D3D3D3"   # gris clair
+)
+
+
+ggplot(df_MiniBulk, aes(x = BPC1, y = BPC3)) +
+  geom_point(aes(fill = state_max_relev),
+             shape = 21,   size = 3,     color = "black",      stroke = 0.1) +
+  theme_classic() +
+  scale_fill_manual(values = state_colors)+
+  theme(
+    strip.text = element_text(size = 8),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  )
+```
+
+
+##Ext4i. Barplot - Cumulative pathway activity by sample
+```{r}
+df_state_attrib <- df_MiniBulk |>
+  dplyr::select(dplyr::any_of(sig_pathways)) 
+
+head(df_state_attrib)
+
+df_state_attrib$CumState <- rowSums(df_state_attrib)
+df_state_attrib$Group <- rna_seurat_umi_el@meta.data$Group_PT
+df_state_attrib$pseudotime <- rna_seurat_umi_el@meta.data$pseudotime
+
+
+
+
+df_state_attrib %>%
+  ggplot( aes(x = Group, y = CumState))+
+  geom_point(alpha = 0.5, shape = 21,position = position_jitter(width = 0.1, height = 0))+
+  geom_boxplot()+
+  theme_classic()
+
+ggplot(df_state_attrib, aes(x = pseudotime, y = CumState))+
+  geom_point(aes(fill = Group), 
+             size = 2,  alpha = 0.5, color = "black",
+             position = position_jitter(width = 0.1, heigh=0)) +
+  geom_smooth(method = "loess", color = "black")+
+  scale_shape_manual(values = c(21, 24))+
+  scale_color_manual(values = (colorRampPalette(brewer.pal(4, "Spectral"))(4))[c(2, 4, 1, 3)])+
+  scale_fill_manual(values = (colorRampPalette(brewer.pal(4, "Spectral"))(4))[c(2, 4, 1, 3)])+
+  theme_classic()
+
+```
+
+```{r}
+anova_model <- aov(CumState~Group, data = df_state_attrib)
+summary(anova_model)
+
+tukey_res <- TukeyHSD(anova_model)
+tukey_res
+```
+
+
+
+## Ext4j. PCA - Pathways assignments
+```{r}
+#Barplot cumulatif cell state per Group
+df_MiniBulk$Group_PT <- rna_seurat_umi_el$Group_PT
+
+# Calcul des proportions
+prop_df <- df_MiniBulk %>%
+  filter(state_max_relev != "Unknown") %>%
+  group_by(Group_PT, state_max_relev) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(Group_PT) %>%
+  mutate(prop = n / sum(n))
+
+
+# Barplot
+
+ggplot(prop_df, aes(x = Group_PT, y = prop, fill = state_max_relev)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent_format()) +
+   scale_fill_manual(values = state_colors)+
+  labs(
+    title = "Proportions de state_max par Group",
+    x = "Group",
+    y = "Proportion",
+    fill = "state_max"
+  ) +
+  theme_minimal()
+
+
+```
+
+
+
+
+
+##Ext4k. Heatmap genes
+
+
+```{r}
+expr_mat <- GetAssayData(rna_seurat_umi_el, slot = "data")
+
+#color scale
+col_fun <- colorRamp2(
+  c(-2, -1, 0, 1, 2),
+  c("#3B6FB6", "#A6C0E8", "#F2F2F2", "#E6A0A0", "#B22222")
+)
+
+```
+```{r}
+genes_of_interest <- c( "H2-Aa","H2-Ab1", "Cd74",    "Foxi1","Hey1", "Deptor","Irf7", "Oasl1", "Parp14","Tbk1",  "Isg15",  "Gas5", "Igfbp5",  "B2m","Irs1","Cxcl10","Cd74", "Irf3" ,#Immune DW
+                        "Bcl11a", "Apobec3", #DW 
+                       "Tspan8", #putative MaSC merker
+                       "Kit","Elf5",  #LP markers
+                      
+                       
+                      "Setdb1","Rnase1", "Cox7b", "Cox7c", "Hes1",  "Tlr3",   "Tmem173","Sox14",  "Hba-a1", #Latency UUP
+                   
+                       
+                       
+                      
+                         "Kdm6b"  , #latency dw
+                       "Csn2", "Wap", #Alv 
+                         "Krt14", "Acta2", #basal marker
+                         "Col1a2", "Vim","Serpine1","Tnfrsf12a","Procr", "Slpi", "Fabp3",   "Chac1",#UP
+                        "Ccl7", "Csf1", "Ccl2","Il6","Ccl9","Il23a","Cxcl12"    #Immune Up
+                       
+                      
+ )
+
+genes_of_interest <- intersect(
+  genes_of_interest,
+  rownames(rna_seurat_umi_el)
+)
+
+mat <- expr_mat[genes_of_interest, rownames(meta) %in% cells_sub] %>% as.matrix %>%t
+
+
+Heatmap(
+  t(scale(mat, center = TRUE, scale = TRUE)),
+        cluster_columns = FALSE,
+        cluster_rows = F, 
+        column_order = order(meta$pseudotime[rownames(meta) %in% cells_sub]), # Order according to pseudot
+        show_column_names = FALSE,
+   top_annotation = age_anno_sub,
+  col = col_fun,
+  row_names_gp = gpar(fontsize = 6) )
+```
+
+
+
+
+## Fig2f - pies Pathways
+```{r}
+library(scatterpie)
+# Binary hallmarks
+hallmark_cols <- grep("^HALLMARK_", colnames(df_MiniBulk)[55:ncol(df_MiniBulk)], value = TRUE)
+
+# Long format
+df_long <- df_MiniBulk %>%
+  dplyr::select(BioSample, BPC1, BPC3, all_of(hallmark_cols)) %>%
+  pivot_longer(
+    cols = all_of(hallmark_cols),
+    names_to = "hallmark",
+    values_to = "value"
+  ) %>%
+  dplyr::filter(value == TRUE) %>%
+  mutate(
+    state_group = case_when(
+      hallmark %in% c("HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION", "HALLMARK_MYOGENESIS") ~ "EMT",
+      hallmark %in% c("HALLMARK_ANGIOGENESIS", "HALLMARK_HYPOXIA") ~ "Angiogenesis",
+      hallmark %in% c("HALLMARK_COAGULATION") ~ "Coagulation",
+      hallmark %in% c("HALLMARK_APOPTOSIS", "HALLMARK_P53_PATHWAY", "HALLMARK_UNFOLDED_PROTEIN_RESPONSE", "HALLMARK_XENOBIOTIC_METABOLISM") ~ "Stress",
+      hallmark %in% c("HALLMARK_INTERFERON_GAMMA_RESPONSE", "HALLMARK_INTERFERON_ALPHA_RESPONSE") ~ "Interferons",
+      hallmark %in% c("HALLMARK_E2F_TARGETS", "HALLMARK_G2M_CHECKPOINT", "HALLMARK_MITOTIC_SPINDLE") ~ "CellCycle",
+      hallmark == "HALLMARK_KRAS_SIGNALING_UP" ~ "Kras",
+      hallmark == "HALLMARK_ADIPOGENESIS" ~ "Adipogenesis",
+      hallmark == "HALLMARK_MTORC1_SIGNALING" ~ "mTorC1",
+      hallmark == "HALLMARK_TNFA_SIGNALING_VIA_NFKB" ~ "TNFa_NFkB",
+      hallmark == "HALLMARK_MYC_TARGETS_V1" ~ "Myc",
+      TRUE ~ "Other"
+    )
+  )
+
+#hallmark per sample - size pie
+df_pie <- df_long %>% dplyr::select(BioSample, BPC1 , BPC3, state_group )  %>% distinct() %>%
+  group_by( BPC1, BPC3, state_group ) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(BPC1, BPC3) %>%
+  mutate(freq = n / sum(n))
+
+
+df_wide <- df_pie %>%
+  pivot_wider(
+    names_from = state_group,
+    values_from = freq,
+    values_fill = 0
+  ) %>%
+  dplyr::filter(
+    is.finite(BPC1),
+    is.finite(BPC3)
+  )
+cols_use <- setdiff(colnames(df_wide), c("BioSample", "BPC1", "BPC3", "n"))
+
+
+plot_tot <- ggplot() +
+  geom_scatterpie(
+    data = df_wide,
+    aes(x = BPC1, y = BPC3),
+   cols = cols_use,
+    pie_scale = 0.5
+  ) +
+  scale_fill_manual(values = state_colors)+
+  coord_equal() +
+  theme_classic()
+
+plot_tot
+```
+```{r}
+#PCA generale
+df_bg <- df_MiniBulk %>%
+  select(BioSample, BPC1, BPC3)
+
+#add biosample
+df_wide <- df_wide %>%
+  left_join(
+    df_MiniBulk %>% select(BioSample, BPC1, BPC3),
+    by = c("BPC1", "BPC3")
+  )
+
+
+cols_use <- setdiff(colnames(df_wide), c("BioSample", "BPC1", "BPC3", "n"))
+
+samples <- unique(df_wide$BioSample)
+df_wide$r <- 1
+
+```
+
+
+```{r}
+plots <- lapply(samples, function(s) {
+  
+  df_sub <- df_wide %>% filter(BioSample == s)
+  
+  # -------------------------
+  # LEFT PANEL : PCA
+  # -------------------------
+  p_left <- ggplot() +
+    geom_point(
+      data = df_bg,
+      aes(x = BPC1, y = BPC3),
+      color = "grey85",
+      size = 1
+    ) +
+    geom_point(
+      data = df_sub,
+      aes(x = BPC1, y = BPC3),
+      color = "black",
+      size = 2
+    ) +
+    coord_equal() +
+    theme_classic() +
+    labs(title = paste0("BioSample: ", s))
+  
+  
+  # -------------------------
+  # RIGHT PANEL : GRID PIE
+  # -------------------------
+df_sub <- df_wide %>% ungroup() %>% 
+  filter(BioSample == s) %>%
+  group_by(BPC1, BPC3) %>%
+  summarise(    across(  all_of(cols_use),
+      ~ sum(.x, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  ) %>% 
+    rowwise() %>%
+  mutate(
+    total = sum(c_across(all_of(cols_use)))
+  ) %>%
+  mutate(
+    across(all_of(cols_use), ~ ifelse(total > 0, .x / total, 0))
+  ) %>%
+  ungroup() %>%
+  mutate(id = row_number())
+
+ncol_grid <- 2
+
+df_sub <- df_sub %>%
+  mutate(
+    col = (id - 1) %% ncol_grid,
+    row = floor((id - 1) / ncol_grid)
+  )
+
+
+df_sub <- df_sub %>%
+  mutate(
+    x_plot = col ,
+    y_plot = -row,
+    r_plot = 0.2   # rayon constant adapté
+  )
+  
+  p_right <- ggplot() +
+    geom_scatterpie(
+      data = df_sub,
+      aes(x = x_plot, y = y_plot, r = r_plot),
+      cols = cols_use
+    ) +
+    scale_fill_manual(values = state_colors) +
+    coord_equal() +
+    theme_void() +
+    labs(title = "Hallmark composition")
+  
+  
+  # -------------------------
+  # COMBINE
+  # -------------------------
+  p_left + p_right + plot_layout(widths = c(1.2, 1))
+})
+
+plots[[12]]
+```
+
+```{r}
+for (s in 1:length(samples)) {
+
+  print(plots[[s]])
+
+}
+
+```
+
+## Fig2g. State dynamics along pseudotime (alluvial / GAM smoothing)
+```{r}
+# Binary columns
+hallmark_cols <- grep("^HALLMARK_", colnames(df_MiniBulk)[55:ncol(df_MiniBulk)], value = TRUE)
+
+
+df_long <- df_MiniBulk %>%
+  select(BioSample, BPC1, BPC3, pseudotime, all_of(hallmark_cols)) %>%
+  pivot_longer(
+    cols = all_of(hallmark_cols),
+    names_to = "hallmark",
+    values_to = "value"
+  ) %>%
+  filter(value == TRUE) %>%
+  mutate(
+    state_group = case_when(
+      hallmark %in% c("HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION", "HALLMARK_MYOGENESIS") ~ "EMT",
+      hallmark %in% c("HALLMARK_ANGIOGENESIS", "HALLMARK_HYPOXIA") ~ "Angiogenesis",
+      hallmark %in% c("HALLMARK_COAGULATION") ~ "Coagulation",
+      hallmark %in% c("HALLMARK_APOPTOSIS", "HALLMARK_P53_PATHWAY", "HALLMARK_UNFOLDED_PROTEIN_RESPONSE", "HALLMARK_XENOBIOTIC_METABOLISM") ~ "Stress",
+      hallmark %in% c("HALLMARK_INTERFERON_GAMMA_RESPONSE", "HALLMARK_INTERFERON_ALPHA_RESPONSE") ~ "Interferons",
+      hallmark %in% c("HALLMARK_E2F_TARGETS", "HALLMARK_G2M_CHECKPOINT", "HALLMARK_MITOTIC_SPINDLE") ~ "CellCycle",
+      hallmark == "HALLMARK_KRAS_SIGNALING_UP" ~ "Kras",
+      hallmark == "HALLMARK_ADIPOGENESIS" ~ "Adipogenesis",
+      hallmark == "HALLMARK_MTORC1_SIGNALING" ~ "mTorC1",
+      hallmark == "HALLMARK_TNFA_SIGNALING_VIA_NFKB" ~ "TNFa_NFkB",
+      hallmark == "HALLMARK_MYC_TARGETS_V1" ~ "Myc",
+      TRUE ~ "Other"
+    )
+  )%>% select( pseudotime, state_group )  %>% distinct()
+
+head(df_long)
+```
+
+```{r}
+#pseudotime Bining
+df_long <- df_long %>%
+  mutate(pt_bin = cut(pseudotime, breaks = 20))  
+df_prop <- df_long %>%
+  group_by(pt_bin, state_group) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(pt_bin) %>%
+  mutate(prop = n / sum(n))
+```
+```{r}
+library("ggforce")
+
+levels_x <- names(state_colors)
+alpha <- 0.7
+
+#pseudotime Bining
+df_prop <- df_long %>%
+  filter(is.na(pseudotime)==F) %>%
+
+    group_by(pseudotime, state_group) %>%
+  summarise(n = n(), .groups = "drop") %>% ungroup()%>%
+  complete(pseudotime, state_group = levels_x, fill = list(n = 0)) %>% # Put 0 instead of null
+  group_by(pseudotime) %>%
+  mutate(freq = n / sum(n)) %>%
+  ungroup()
+
+g1 <- ggplot(df_prop,
+       aes(x = pseudotime,
+           y = freq,
+           fill = state_group)) +
+  geom_area(position = "fill", alpha = 0.9) +
+  scale_fill_manual(values = state_colors) +
+  theme_classic() +
+  theme(legend.position = "right")
+
+```
+
+
+```{r}
+
+#oyu GAM
+library(mgcv)
+
+df_smooth <- df_prop %>%
+  group_by(state_group) %>%
+  do({
+    df <- .
+    
+    # Avoid 0 & 1 
+    df$freq_adj <- pmin(pmax(df$freq, 1e-5), 1 - 1e-5)
+    
+    # fit GAM
+    m <- gam(freq_adj ~ s(pseudotime, k = 15),
+             data = df,
+             family = quasibinomial())
+    
+    # predictions
+    df$freq_smooth <- predict(m, type = "response")
+    
+    df
+  }) %>%
+  ungroup()
+
+df_smooth <- df_smooth %>%
+  group_by(pseudotime) %>%
+  mutate(freq_smooth = freq_smooth / sum(freq_smooth)) %>%
+  ungroup()
+
+g2 <- ggplot() +
+  geom_area(data = df_smooth,
+       aes(x = pseudotime, y = freq_smooth, fill = state_group),
+       alpha = 0.9) +
+  scale_fill_manual(values = state_colors) +
+  theme_classic()
+
+grid.arrange(g1, g2, ncol =1)
+```
+
+
+##Fig2h. Shannon diversity of pathways
+```{r}
+# cBinary columns hall.
+hallmark_cols <- grep("^HALLMARK_", colnames(df_MiniBulk)[55:ncol(df_MiniBulk)], value = TRUE)
+
+#long
+df_long <- df_MiniBulk %>%
+  dplyr::select(BioSample, BPC1, BPC3, all_of(hallmark_cols)) %>%
+  pivot_longer(
+    cols = all_of(hallmark_cols),
+    names_to = "hallmark",
+    values_to = "value"
+  ) %>%
+  dplyr::filter(value == TRUE) %>%
+  mutate(
+    state_group = case_when(
+      hallmark %in% c("HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION", "HALLMARK_MYOGENESIS") ~ "EMT",
+      hallmark %in% c("HALLMARK_ANGIOGENESIS", "HALLMARK_HYPOXIA") ~ "Angiogenesis",
+      hallmark %in% c("HALLMARK_COAGULATION") ~ "Coagulation",
+      hallmark %in% c("HALLMARK_APOPTOSIS", "HALLMARK_P53_PATHWAY", "HALLMARK_UNFOLDED_PROTEIN_RESPONSE", "HALLMARK_XENOBIOTIC_METABOLISM") ~ "Stress",
+      hallmark %in% c("HALLMARK_INTERFERON_GAMMA_RESPONSE", "HALLMARK_INTERFERON_ALPHA_RESPONSE") ~ "Interferons",
+      hallmark %in% c("HALLMARK_E2F_TARGETS", "HALLMARK_G2M_CHECKPOINT", "HALLMARK_MITOTIC_SPINDLE") ~ "CellCycle",
+      hallmark == "HALLMARK_KRAS_SIGNALING_UP" ~ "Kras",
+      hallmark == "HALLMARK_ADIPOGENESIS" ~ "Adipogenesis",
+      hallmark == "HALLMARK_MTORC1_SIGNALING" ~ "mTorC1",
+      hallmark == "HALLMARK_TNFA_SIGNALING_VIA_NFKB" ~ "TNFa_NFkB",
+      hallmark == "HALLMARK_MYC_TARGETS_V1" ~ "Myc",
+      TRUE ~ "Other"
+    )
+  )
+
+#hallmark per sample - size pie
+df_pie <- df_long %>% dplyr::select(BioSample, BPC1 , BPC3, state_group )  %>% distinct() %>%
+  group_by( BPC1, BPC3, state_group ) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(BPC1, BPC3) %>%
+  mutate(freq = n / sum(n))
+
+
+df_wide <- df_pie %>%
+  pivot_wider(
+    names_from = state_group,
+    values_from = freq,
+    values_fill = 0
+  ) %>%
+  dplyr::filter(
+    is.finite(BPC1),
+    is.finite(BPC3)
+  )
+```
+
+```{r}
+cols_use <- setdiff(colnames(df_wide), c("BioSample", "BPC1", "BPC3", "r", "n"))
+
+df_shannon <- df_wide %>%
+  group_by(BPC1, BPC3) %>%
+  summarise(    across(  all_of(cols_use),
+      ~ sum(.x, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  ) %>%
+  ungroup() %>%
+  rowwise() %>% 
+  mutate(
+    shannon = {
+      p <- c_across(all_of(cols_use))
+      p <- p[p > 0]
+      -sum(p * log(p))
+    }
+  ) %>%
+    left_join(
+    df_MiniBulk %>% dplyr::select( BPC1, BPC3, Group_PT,BioSample, Juxta_Not, pseudotime),
+    by = c( "BPC1", "BPC3")
+  ) %>% distinct()
+
+
+p1 <- ggplot(df_shannon, aes(x = Group_PT, y = shannon, fill = Group_PT)) +
+  geom_boxplot(outliers = F, color = "black")+
+  geom_point(aes(shape = Juxta_Not), 
+             size = 1,  alpha = 0.5, color = "black",
+             position = position_jitter(width = 0.1, heigh=0)) +
+  stat_compare_means(method = "anova",
+                     label.y = max(df_shannon$shannon, na.rm = TRUE) * 1.5) +
+  stat_pvalue_manual(tuk, label = "p.adj.signif", step.increase = 0.1,  xmin = "group1",
+  xmax = "group2") +
+  scale_shape_manual(values = c(21, 24))+
+  scale_color_manual(values = (colorRampPalette(brewer.pal(4, "Spectral"))(4))[c(2, 4, 1, 3)])+
+  scale_fill_manual(values = (colorRampPalette(brewer.pal(4, "Spectral"))(4))[c(2, 4, 1, 3)])+
+  theme_classic()
+
+p1
+```
+
+```{r}
+anova_model <- aov(shannon~Group_PT, data = df_shannon)
+summary(anova_model)
+
+tukey_res <- TukeyHSD(anova_model)
+tukey_res
+```
+
+```{r}
+p2 <- ggplot(df_shannon, aes(x = pseudotime, y = shannon))+
+  geom_point(aes(shape = Juxta_Not, fill = Group_PT), 
+             size = 2,  alpha = 0.5, color = "black",
+             position = position_jitter(width = 0.1, heigh=0)) +
+  geom_smooth(method = "lm", color = "black")+
+  scale_shape_manual(values = c(21, 24))+
+  scale_color_manual(values = (colorRampPalette(brewer.pal(4, "Spectral"))(4))[c(2, 4, 1, 3)])+
+  scale_fill_manual(values = (colorRampPalette(brewer.pal(4, "Spectral"))(4))[c(2, 4, 1, 3)])+
+  theme_classic()
+
+p2
+```
+
+```{r}
+cor(df_shannon$shannon, df_shannon$pseudotime, method = "spearman", use = "complete.obs")
+```
+```{r}
+p1 + p2
+
+```
+
+
+
+
+
+

@@ -1,0 +1,124 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(data.table)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+
+library(Seurat)
+library(patchwork)
+library(DoubletFinder)
+
+library(ggplot2)
+library(gridExtra)
+library(ggExtra)
+library(viridis)
+library(Matrix)
+library("ggsci")
+library(cowplot)
+library(platetools)
+library(scales)
+library("gridExtra")
+library(ggpubr)
+library(RColorBrewer)
+library(tidyr)
+library(dplyr)
+library(ggforce)
+
+#To add filename
+read_plus <- function(flnm) {
+    read.csv(flnm, header = TRUE, na.strings=c("", " ")) %>% 
+        mutate(filename = flnm)
+}
+
+# Def Paths
+Output_Dir <- "C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/sc_Pseudotime/"
+```
+
+
+# Score single-cell
+The pre-tumoral pseudotime score was derived at single-cell resolution by projecting the sc-RNAseq dataset onto the previously defined “MiniBulk” principal component space. 
+Cells were mapped using shared gene loadings and centered expression values, enabling transfer of the PCA structure across datasets. 
+The same linear model relating principal components to biological age, previously defined, was then fitted, and pseudotime was defined as a weighted combination of projected PC scores using the learned coefficients, providing an estimation of pre-tumoral progression at the single-cell level
+
+
+```{r}
+seurat_rna <- qs::qread(file.path("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/seurat_rna_step7_new.qs"))
+
+seurat <- qs::qread(file.path("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/seurat_step5_new.qs"))
+
+#Bulk
+rna_seurat_umi_el <- qs::qread(file.path("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/MiniBulkRNA/rna_seurat_umi_el.qs"))
+
+#PCA parameters
+features <- qs::qread(file.path("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/MiniBulkRNA/features_PCA_MiniBulk.qs"))
+
+loadding <-  qs::qread(file.path("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/MiniBulkRNA/loading_PCA_MiniBulk.qs"))
+
+center <-  qs::qread(file.path("C:/Users/Marthe Laisne/OneDrive - INSTITUT CURIE/m_laisne/Publications/2026_Laisne/Scripts/Output/MiniBulkRNA/centers_PCA_MiniBulk.qs"))
+
+```
+
+
+
+```{r}
+DefaultAssay(seurat_rna) <- ("RNA_umi")
+
+common_genes <- intersect(features, rownames(seurat_rna ) )
+
+seurat_rna <- NormalizeData(seurat_rna)
+seurat_rna  <- ScaleData(
+ seurat_rna ,
+  features = common_genes,
+  verbose = FALSE
+)
+
+common_load <- intersect(rownames(loadings) , rownames(seurat_rna))
+
+######## proj
+
+scaled <- GetAssayData( seurat_rna ,  slot = "data")[common_load, ] %>% t() 
+scaled <-   scale(scaled, center = center[common_load], scale = F)
+
+
+
+# projection = X * rotation
+proj <- t(loadings[common_load,]) %*% t(scaled)
+
+#######
+
+seurat_rna[["pca_proj"]] <- CreateDimReducObject(
+  embeddings = t(proj),
+  key = "projPC_"
+)
+
+DimPlot(seurat_rna, reduction = "pca_proj", group.by = "CellFate_RNA", dims = c(1, 3))
+
+DimPlot(seurat_rna, reduction = "pca_proj", group.by = "Group", dims = c(1, 3))
+```
+
+
+Pseudotemps
+```{r}
+coefs <- coefficients(fit)
+
+seurat_rna@meta.data$pseudotime <- 
+  coefs["(Intercept)"] +
+  coefs["BPC_1"] * seurat_rna@reductions$pca_proj@cell.embeddings[,1] +
+  coefs["BPC_3"] * seurat_rna@reductions$pca_proj@cell.embeddings[,3]
+
+```
+
+
+
+```{r}
+qs::qsave(seurat_rna, file = paste0(Output_Dir, "seurat_rna_withPseudotime.qs") )
+
+```
+
+
