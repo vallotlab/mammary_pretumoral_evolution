@@ -2,7 +2,7 @@
 This folder contains the code to reproduce the analysis from *Laisné, Schwartz 2026* paper. 
 
 ## 0. Data availability
-Input and annotation data required to run the scripts are deposited to Zenodo (**DOI: XXX**). 
+Input and annotation data required to run the scripts are deposited to Zenodo (**DOI: XXX - private until publication**). 
 
 ## 1. Script description 
 The **scripts** folder contains the following files, each correpsonding to a separate analysis block:
@@ -35,7 +35,7 @@ To reproduce the full analysis, the scripts should be run in designated order to
 To reproduce the final figures, only the **_Figures** scripts can be run, starting from the final data object loaded to Zenodo (**DOI: XXX**). 
 
 ## 2. Dependencies
-The code was run in Rstudio, using R (4.5.1) **Marthe's R studio version** and Python (v3.10.19).
+The code was run in Rstudio, using R (4.5.1) and Python (v3.10.19).
 \
 \
 Required R packages are listed in the beginnig of each script.
@@ -45,5 +45,5 @@ Before running the scripts, the Python evironment *snap_py310_env.yml* should be
 The installation time should not exceed 60 min.
 
 ## 3. Runtime
-On a standard laptop, the runtime for all of the scripts does not exceed 30 min (MacBook Pro M4, 128Gb RAM) or **Marthe's laptop**
+On a standard laptop, the runtime for all of the scripts does not exceed 30 min (MacBook Pro M4, 128Gb RAM).
 
